@@ -113,6 +113,22 @@ func (cluster *fakeCluster) handleSourceIngress(writer http.ResponseWriter, requ
 	switch request.Method {
 	case http.MethodGet:
 		writeJSON(writer, ingress)
+	case http.MethodPatch:
+		var patch struct {
+			Metadata struct {
+				Annotations map[string]string `json:"annotations"`
+			} `json:"metadata"`
+		}
+		readJSON(request, &patch)
+		updated := ingress.DeepCopy()
+		if updated.Annotations == nil {
+			updated.Annotations = map[string]string{}
+		}
+		for key, value := range patch.Metadata.Annotations {
+			updated.Annotations[key] = value
+		}
+		cluster.ingresses["apps/whoami"] = updated
+		writeJSON(writer, updated)
 	case http.MethodPut:
 		var updated networkingv1.Ingress
 		readJSON(request, &updated)
@@ -124,15 +140,23 @@ func (cluster *fakeCluster) handleSourceIngress(writer http.ResponseWriter, requ
 }
 
 func (cluster *fakeCluster) handleSourceIngressStatus(writer http.ResponseWriter, request *http.Request) {
-	if request.Method != http.MethodPut {
+	if request.Method != http.MethodPut && request.Method != http.MethodPatch {
 		methodNotAllowed(writer)
 		return
 	}
 
-	var updated networkingv1.Ingress
-	readJSON(request, &updated)
 	existing := cluster.ingresses["apps/whoami"].DeepCopy()
-	existing.Status = updated.Status
+	if request.Method == http.MethodPatch {
+		var patch struct {
+			Status networkingv1.IngressStatus `json:"status"`
+		}
+		readJSON(request, &patch)
+		existing.Status = patch.Status
+	} else {
+		var updated networkingv1.Ingress
+		readJSON(request, &updated)
+		existing.Status = updated.Status
+	}
 	cluster.ingresses["apps/whoami"] = existing
 	writeJSON(writer, existing)
 }

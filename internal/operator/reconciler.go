@@ -2,6 +2,9 @@ package operator
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"net/netip"
 	"sort"
@@ -47,6 +50,9 @@ func (reconciler Reconciler) Reconcile(ctx context.Context) (Summary, error) {
 	if reconciler.Client == nil {
 		return Summary{}, fmt.Errorf("kubernetes client is required")
 	}
+	if config.SourceClassName == config.ImplementationIngressClassName {
+		return Summary{}, fmt.Errorf("source and implementation ingress classes must differ")
+	}
 
 	list, err := reconciler.Client.NetworkingV1().Ingresses("").List(ctx, metav1.ListOptions{})
 	if err != nil {
@@ -56,6 +62,21 @@ func (reconciler Reconciler) Reconcile(ctx context.Context) (Summary, error) {
 	summary := Summary{}
 	records := append([]DNSRecord{}, config.StaticRecords...)
 	activeImplementations := map[types.NamespacedName]struct{}{}
+	hostOwners := map[string]map[string]struct{}{}
+
+	for i := range list.Items {
+		source := list.Items[i]
+		if source.Spec.IngressClassName == nil || *source.Spec.IngressClassName != config.SourceClassName {
+			continue
+		}
+		sourceID := source.Namespace + "/" + source.Name
+		for _, host := range hostsForIngress(source) {
+			if hostOwners[host] == nil {
+				hostOwners[host] = map[string]struct{}{}
+			}
+			hostOwners[host][sourceID] = struct{}{}
+		}
+	}
 
 	for i := range list.Items {
 		source := list.Items[i]
@@ -76,6 +97,14 @@ func (reconciler Reconciler) Reconcile(ctx context.Context) (Summary, error) {
 
 		if invalidHost := firstDisallowedHost(hosts, config.AllowedZones); invalidHost != "" {
 			summary.Skipped = append(summary.Skipped, sourceID+": host "+invalidHost+" is outside allowed zones")
+			if err := reconciler.markSource(ctx, source, statusRejected, nil); err != nil {
+				return summary, err
+			}
+			continue
+		}
+
+		if conflictingHost := firstConflictingHost(hosts, hostOwners, sourceID); conflictingHost != "" {
+			summary.Skipped = append(summary.Skipped, sourceID+": host "+conflictingHost+" is claimed by another headscale ingress")
 			if err := reconciler.markSource(ctx, source, statusRejected, nil); err != nil {
 				return summary, err
 			}
@@ -129,7 +158,7 @@ func (reconciler Reconciler) Reconcile(ctx context.Context) (Summary, error) {
 func (reconciler Reconciler) deleteStaleImplementations(ctx context.Context, ingresses []networkingv1.Ingress, active map[types.NamespacedName]struct{}) (int, error) {
 	deleted := 0
 	for _, ingress := range ingresses {
-		if ingress.Labels[managedByLabel] != managedByValue {
+		if !isManagedImplementation(ingress) {
 			continue
 		}
 		key := namespacedName(ingress.Namespace, ingress.Name)
@@ -142,6 +171,16 @@ func (reconciler Reconciler) deleteStaleImplementations(ctx context.Context, ing
 		deleted++
 	}
 	return deleted, nil
+}
+
+func isManagedImplementation(ingress networkingv1.Ingress) bool {
+	if ingress.Labels[managedByLabel] != managedByValue {
+		return false
+	}
+	if ingress.Labels[sourceNamespaceLabel] == "" || ingress.Labels[sourceNameLabel] == "" {
+		return false
+	}
+	return ingress.Labels[sourceNamespaceLabel] == ingress.Namespace
 }
 
 func implementationIngressFor(source networkingv1.Ingress, config Config) networkingv1.Ingress {
@@ -163,7 +202,7 @@ func implementationIngressFor(source networkingv1.Ingress, config Config) networ
 
 	implementation := networkingv1.Ingress{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:        source.Name + config.ImplementationNameSuffix,
+			Name:        generatedIngressName(source.Name, config.ImplementationNameSuffix),
 			Namespace:   source.Namespace,
 			Labels:      labels,
 			Annotations: annotations,
@@ -205,29 +244,42 @@ func (reconciler Reconciler) applyImplementationIngress(ctx context.Context, des
 
 func (reconciler Reconciler) markSource(ctx context.Context, source networkingv1.Ingress, status string, targets []string) error {
 	client := reconciler.Client.NetworkingV1().Ingresses(source.Namespace)
-	copy := source.DeepCopy()
-	if copy.Annotations == nil {
-		copy.Annotations = map[string]string{}
-	}
-	copy.Annotations[statusAnnotation] = status
-	updated, err := client.Update(ctx, copy, metav1.UpdateOptions{})
+
+	metadataPatch, err := json.Marshal(map[string]any{
+		"metadata": map[string]any{
+			"annotations": map[string]string{
+				statusAnnotation: status,
+			},
+		},
+	})
 	if err != nil {
-		return fmt.Errorf("update source ingress annotation %s/%s: %w", source.Namespace, source.Name, err)
+		return err
+	}
+	_, err = client.Patch(ctx, source.Name, types.MergePatchType, metadataPatch, metav1.PatchOptions{})
+	if err != nil {
+		return fmt.Errorf("patch source ingress annotation %s/%s: %w", source.Namespace, source.Name, err)
 	}
 
 	if len(targets) == 0 {
 		return nil
 	}
 
-	statusCopy := updated.DeepCopy()
-	statusCopy.Status.LoadBalancer.Ingress = make([]networkingv1.IngressLoadBalancerIngress, 0, len(targets))
+	statusIngresses := make([]map[string]string, 0, len(targets))
 	for _, target := range targets {
-		statusCopy.Status.LoadBalancer.Ingress = append(statusCopy.Status.LoadBalancer.Ingress, networkingv1.IngressLoadBalancerIngress{
-			IP: target,
-		})
+		statusIngresses = append(statusIngresses, map[string]string{"ip": target})
 	}
-	if _, err := client.UpdateStatus(ctx, statusCopy, metav1.UpdateOptions{}); err != nil {
-		return fmt.Errorf("update source ingress status %s/%s: %w", source.Namespace, source.Name, err)
+	statusPatch, err := json.Marshal(map[string]any{
+		"status": map[string]any{
+			"loadBalancer": map[string]any{
+				"ingress": statusIngresses,
+			},
+		},
+	})
+	if err != nil {
+		return err
+	}
+	if _, err := client.Patch(ctx, source.Name, types.MergePatchType, statusPatch, metav1.PatchOptions{}, "status"); err != nil {
+		return fmt.Errorf("patch source ingress status %s/%s: %w", source.Namespace, source.Name, err)
 	}
 	return nil
 }
@@ -303,6 +355,19 @@ func firstDisallowedHost(hosts []string, zones []string) string {
 	return ""
 }
 
+func firstConflictingHost(hosts []string, hostOwners map[string]map[string]struct{}, sourceID string) string {
+	for _, host := range hosts {
+		owners := hostOwners[host]
+		if len(owners) <= 1 {
+			continue
+		}
+		if _, ok := owners[sourceID]; ok {
+			return host
+		}
+	}
+	return ""
+}
+
 func hostAllowed(host string, zones []string) bool {
 	if len(zones) == 0 {
 		return true
@@ -347,6 +412,26 @@ func targetIPsFor(source networkingv1.Ingress, implementation networkingv1.Ingre
 	}
 	sort.Strings(targets)
 	return targets
+}
+
+func generatedIngressName(sourceName string, suffix string) string {
+	name := sourceName + suffix
+	if len(name) <= 63 {
+		return name
+	}
+
+	sum := sha256.Sum256([]byte(name))
+	hash := hex.EncodeToString(sum[:])[:12]
+	maxPrefix := 63 - len(hash) - 1
+	if maxPrefix < 1 {
+		return hash
+	}
+
+	prefix := strings.TrimRight(sourceName[:min(len(sourceName), maxPrefix)], "-")
+	if prefix == "" {
+		return hash
+	}
+	return prefix + "-" + hash
 }
 
 func ptr[T any](value T) *T {

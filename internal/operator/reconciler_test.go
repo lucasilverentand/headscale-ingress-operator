@@ -3,6 +3,7 @@ package operator
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -150,6 +151,114 @@ func TestReconcileDeletesStaleImplementationIngress(t *testing.T) {
 
 	if _, err := client.NetworkingV1().Ingresses("apps").Get(ctx, "old-headscale", metav1.GetOptions{}); err == nil {
 		t.Fatal("stale implementation ingress still exists")
+	}
+}
+
+func TestReconcileDoesNotDeleteIngressWithOnlyManagedByLabel(t *testing.T) {
+	ctx := context.Background()
+	unrelated := &networkingv1.Ingress{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "unrelated",
+			Namespace: "apps",
+			Labels: map[string]string{
+				managedByLabel: managedByValue,
+			},
+		},
+	}
+	client := fake.NewSimpleClientset(
+		namespace("apps"),
+		namespace("headscale"),
+		unrelated,
+	)
+
+	reconciler := Reconciler{
+		Client: client,
+		Config: Config{
+			HeadscaleNamespace:   "headscale",
+			RecordsConfigMapName: "headscale-extra-records",
+			RecordsConfigMapKey:  "extra-records.json",
+		},
+	}
+
+	summary, err := reconciler.Reconcile(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.DeletedImplementations != 0 {
+		t.Fatalf("deleted implementations = %d", summary.DeletedImplementations)
+	}
+	if _, err := client.NetworkingV1().Ingresses("apps").Get(ctx, "unrelated", metav1.GetOptions{}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestReconcileRejectsDuplicateHosts(t *testing.T) {
+	ctx := context.Background()
+	client := fake.NewSimpleClientset(
+		namespace("apps"),
+		namespace("headscale"),
+		sourceIngress("apps", "app-a", "shared.cluster.example", "headscale"),
+		sourceIngress("apps", "app-b", "shared.cluster.example", "headscale"),
+	)
+
+	reconciler := Reconciler{
+		Client: client,
+		Config: Config{
+			AllowedZones:         []string{"cluster.example"},
+			DefaultTargetIPs:     []string{"100.64.0.10"},
+			HeadscaleNamespace:   "headscale",
+			RecordsConfigMapName: "headscale-extra-records",
+			RecordsConfigMapKey:  "extra-records.json",
+		},
+	}
+
+	summary, err := reconciler.Reconcile(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(summary.Skipped) != 2 || summary.ImplementationIngresses != 0 || summary.Records != 0 {
+		t.Fatalf("unexpected summary: %+v", summary)
+	}
+
+	for _, name := range []string{"app-a", "app-b"} {
+		updated, err := client.NetworkingV1().Ingresses("apps").Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if updated.Annotations[statusAnnotation] != statusRejected {
+			t.Fatalf("%s status = %q", name, updated.Annotations[statusAnnotation])
+		}
+		if _, err := client.NetworkingV1().Ingresses("apps").Get(ctx, name+"-headscale", metav1.GetOptions{}); err == nil {
+			t.Fatalf("unexpected implementation ingress for %s", name)
+		}
+	}
+}
+
+func TestGeneratedIngressNameIsBounded(t *testing.T) {
+	sourceName := strings.Repeat("a", 63)
+	name := generatedIngressName(sourceName, "-headscale")
+	if len(name) > 63 {
+		t.Fatalf("generated name length = %d", len(name))
+	}
+	if name != generatedIngressName(sourceName, "-headscale") {
+		t.Fatal("generated name should be deterministic")
+	}
+	if name == sourceName+"-headscale" {
+		t.Fatal("generated name should be shortened")
+	}
+}
+
+func TestReconcileRejectsSelfReferentialIngressClassConfig(t *testing.T) {
+	reconciler := Reconciler{
+		Client: fake.NewSimpleClientset(),
+		Config: Config{
+			SourceClassName:                "headscale",
+			ImplementationIngressClassName: "headscale",
+		},
+	}
+
+	if _, err := reconciler.Reconcile(context.Background()); err == nil {
+		t.Fatal("expected an error when source and implementation classes match")
 	}
 }
 

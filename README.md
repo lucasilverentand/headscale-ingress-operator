@@ -69,3 +69,7 @@ Render the install manifests:
 ```bash
 kubectl kustomize deploy
 ```
+
+The default deployment image is `headscale-ingress-operator:local`. Build and
+load that image into your local test cluster, or patch the image to a private
+registry before applying the manifests.

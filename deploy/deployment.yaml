@@ -18,7 +18,8 @@ spec:
       serviceAccountName: headscale-ingress-operator
       containers:
         - name: operator
-          image: ghcr.io/example/headscale-ingress-operator:latest
+          image: headscale-ingress-operator:local
+          imagePullPolicy: IfNotPresent
           args:
             - --source-class=headscale
             - --implementation-class=traefik-internal
