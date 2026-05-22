@@ -61,6 +61,8 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=registry,ref=ghcr.io/lucasilverentand/headscale-ingress-operator:buildcache
+          cache-to: type=registry,ref=ghcr.io/lucasilverentand/headscale-ingress-operator:buildcache,mode=max,image-manifest=true,oci-mediatypes=true
           provenance: true
           sbom: true
 
