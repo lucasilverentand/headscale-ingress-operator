@@ -1,4 +1,4 @@
 [tools]
 go = "1.26.3"
 helm = "3.19.5"
-kubectl = "1.33.9"
+kubectl = "1.36.1"
