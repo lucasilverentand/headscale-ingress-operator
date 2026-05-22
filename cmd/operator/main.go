@@ -20,25 +20,17 @@ import (
 func main() {
 	var kubeconfig string
 	var interval time.Duration
-	var sourceClass string
-	var implementationClass string
-	var implementationSuffix string
 	var headscaleNamespace string
 	var recordsConfigMap string
 	var recordsKey string
 	var allowedZones string
-	var defaultTargets string
 
 	flag.StringVar(&kubeconfig, "kubeconfig", os.Getenv("KUBECONFIG"), "Path to kubeconfig. Defaults to in-cluster config when empty.")
 	flag.DurationVar(&interval, "interval", 30*time.Second, "Reconcile interval.")
-	flag.StringVar(&sourceClass, "source-class", "headscale", "IngressClass handled by this operator.")
-	flag.StringVar(&implementationClass, "implementation-class", "traefik-internal", "IngressClass used for generated implementation Ingresses.")
-	flag.StringVar(&implementationSuffix, "implementation-suffix", "-headscale", "Suffix for generated implementation Ingress names.")
 	flag.StringVar(&headscaleNamespace, "headscale-namespace", "headscale", "Namespace containing the Headscale records ConfigMap.")
 	flag.StringVar(&recordsConfigMap, "records-configmap", "headscale-extra-records", "Name of the Headscale records ConfigMap.")
 	flag.StringVar(&recordsKey, "records-key", "extra-records.json", "ConfigMap key containing Headscale extra_records_path JSON.")
 	flag.StringVar(&allowedZones, "allowed-zones", "", "Comma-separated DNS zones this operator may publish. Empty allows all hosts.")
-	flag.StringVar(&defaultTargets, "default-targets", "", "Comma-separated fallback A/AAAA targets when generated Ingress status is empty.")
 	flag.Parse()
 
 	if interval <= 0 {
@@ -47,14 +39,10 @@ func main() {
 	}
 
 	operatorConfig := operator.Config{
-		SourceClassName:                sourceClass,
-		ImplementationIngressClassName: implementationClass,
-		ImplementationNameSuffix:       implementationSuffix,
-		HeadscaleNamespace:             headscaleNamespace,
-		RecordsConfigMapName:           recordsConfigMap,
-		RecordsConfigMapKey:            recordsKey,
-		AllowedZones:                   splitCSV(allowedZones),
-		DefaultTargetIPs:               splitCSV(defaultTargets),
+		HeadscaleNamespace:   headscaleNamespace,
+		RecordsConfigMapName: recordsConfigMap,
+		RecordsConfigMapKey:  recordsKey,
+		AllowedZones:         splitCSV(allowedZones),
 	}
 	if err := operatorConfig.Validate(); err != nil {
 		slog.Error("invalid configuration", "error", err)
@@ -84,9 +72,7 @@ func main() {
 			slog.Error("reconcile failed", "error", err)
 		} else {
 			slog.Info("reconciled",
-				"sources", summary.SourceIngresses,
-				"implementations", summary.ImplementationIngresses,
-				"deletedImplementations", summary.DeletedImplementations,
+				"services", summary.SourceServices,
 				"records", summary.Records,
 				"skipped", summary.Skipped,
 			)
