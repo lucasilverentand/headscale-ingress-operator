@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.1](https://github.com/lucasilverentand/headscale-ingress-operator/compare/v1.0.0...v1.0.1) (2026-05-22)
+
+
+### Bug Fixes
+
+* speed up multi-arch image builds ([#8](https://github.com/lucasilverentand/headscale-ingress-operator/issues/8)) ([25741b4](https://github.com/lucasilverentand/headscale-ingress-operator/commit/25741b496cac5505ceb557c85b7c8a5bd0ef6fba)), closes [#3](https://github.com/lucasilverentand/headscale-ingress-operator/issues/3)
+
 ## 1.0.0 (2026-05-22)
 
 
