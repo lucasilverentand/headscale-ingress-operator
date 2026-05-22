@@ -5,6 +5,8 @@ import (
 	"net/netip"
 	"sort"
 	"strings"
+
+	"k8s.io/apimachinery/pkg/util/validation"
 )
 
 type DNSRecord struct {
@@ -17,11 +19,11 @@ func recordsFor(hosts []string, targets []string) []DNSRecord {
 	records := make([]DNSRecord, 0, len(hosts)*len(targets))
 	for _, host := range hosts {
 		for _, target := range targets {
-			recordType := "A"
 			address, err := netip.ParseAddr(target)
 			if err != nil {
 				continue
 			}
+			recordType := "A"
 			if address.Is6() {
 				recordType = "AAAA"
 			}
@@ -47,12 +49,12 @@ func stableRecordsJSON(records []DNSRecord) (string, error) {
 func dedupeRecords(records []DNSRecord) []DNSRecord {
 	seen := map[string]DNSRecord{}
 	for _, record := range records {
-		record.Name = normalizeHost(record.Name)
-		if record.Name == "" || record.Value == "" {
+		normalized, ok := normalizeRecord(record)
+		if !ok {
 			continue
 		}
-		key := record.Name + "\x00" + record.Type + "\x00" + record.Value
-		seen[key] = record
+		key := normalized.Name + "\x00" + normalized.Type + "\x00" + normalized.Value
+		seen[key] = normalized
 	}
 
 	deduped := make([]DNSRecord, 0, len(seen))
@@ -73,4 +75,39 @@ func dedupeRecords(records []DNSRecord) []DNSRecord {
 
 func normalizeHost(host string) string {
 	return strings.TrimSuffix(strings.ToLower(strings.TrimSpace(host)), ".")
+}
+
+func normalizeRecord(record DNSRecord) (DNSRecord, bool) {
+	name := normalizeHost(record.Name)
+	if name == "" || strings.Contains(name, "*") {
+		return DNSRecord{}, false
+	}
+	if len(validation.IsDNS1123Subdomain(name)) > 0 {
+		return DNSRecord{}, false
+	}
+
+	address, err := netip.ParseAddr(strings.TrimSpace(record.Value))
+	if err != nil {
+		return DNSRecord{}, false
+	}
+
+	recordType := strings.ToUpper(strings.TrimSpace(record.Type))
+	switch recordType {
+	case "A":
+		if !address.Is4() {
+			return DNSRecord{}, false
+		}
+	case "AAAA":
+		if !address.Is6() {
+			return DNSRecord{}, false
+		}
+	default:
+		return DNSRecord{}, false
+	}
+
+	return DNSRecord{
+		Name:  name,
+		Type:  recordType,
+		Value: address.String(),
+	}, true
 }

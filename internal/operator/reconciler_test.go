@@ -83,10 +83,12 @@ func TestReconcileCreatesImplementationIngressAndHeadscaleRecords(t *testing.T) 
 
 func TestReconcileRejectsHostsOutsideAllowedZones(t *testing.T) {
 	ctx := context.Background()
+	source := sourceIngress("apps", "bad", "bad.other.example", "headscale")
+	source.Status.LoadBalancer.Ingress = []networkingv1.IngressLoadBalancerIngress{{IP: "100.64.0.99"}}
 	client := fake.NewSimpleClientset(
 		namespace("apps"),
 		namespace("headscale"),
-		sourceIngress("apps", "bad", "bad.other.example", "headscale"),
+		source,
 	)
 
 	reconciler := Reconciler{
@@ -118,6 +120,42 @@ func TestReconcileRejectsHostsOutsideAllowedZones(t *testing.T) {
 	}
 	if configMap.Data["extra-records.json"] != "[]\n" {
 		t.Fatalf("records = %q", configMap.Data["extra-records.json"])
+	}
+
+	updated, err := client.NetworkingV1().Ingresses("apps").Get(ctx, "bad", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(updated.Status.LoadBalancer.Ingress) != 0 {
+		t.Fatalf("expected rejected source status to be cleared, got %#v", updated.Status.LoadBalancer.Ingress)
+	}
+}
+
+func TestReconcileRejectsInvalidDNSHosts(t *testing.T) {
+	ctx := context.Background()
+	client := fake.NewSimpleClientset(
+		namespace("apps"),
+		namespace("headscale"),
+		sourceIngress("apps", "bad", "bad_name.cluster.example", "headscale"),
+	)
+
+	reconciler := Reconciler{
+		Client: client,
+		Config: Config{
+			AllowedZones:         []string{"cluster.example"},
+			DefaultTargetIPs:     []string{"100.64.0.10"},
+			HeadscaleNamespace:   "headscale",
+			RecordsConfigMapName: "headscale-extra-records",
+			RecordsConfigMapKey:  "extra-records.json",
+		},
+	}
+
+	summary, err := reconciler.Reconcile(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(summary.Skipped) != 1 || summary.ImplementationIngresses != 0 || summary.Records != 0 {
+		t.Fatalf("unexpected summary: %+v", summary)
 	}
 }
 
@@ -192,6 +230,37 @@ func TestReconcileDoesNotDeleteIngressWithOnlyManagedByLabel(t *testing.T) {
 	}
 }
 
+func TestReconcileDoesNotDeleteManagedLabelsWithoutOwnerReference(t *testing.T) {
+	ctx := context.Background()
+	spoofed := implementationIngressFor(*sourceIngress("apps", "old", "old.cluster.example", "headscale"), Config{}.withDefaults())
+	spoofed.OwnerReferences = nil
+	client := fake.NewSimpleClientset(
+		namespace("apps"),
+		namespace("headscale"),
+		&spoofed,
+	)
+
+	reconciler := Reconciler{
+		Client: client,
+		Config: Config{
+			HeadscaleNamespace:   "headscale",
+			RecordsConfigMapName: "headscale-extra-records",
+			RecordsConfigMapKey:  "extra-records.json",
+		},
+	}
+
+	summary, err := reconciler.Reconcile(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.DeletedImplementations != 0 {
+		t.Fatalf("deleted implementations = %d", summary.DeletedImplementations)
+	}
+	if _, err := client.NetworkingV1().Ingresses("apps").Get(ctx, "old-headscale", metav1.GetOptions{}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestReconcileRejectsDuplicateHosts(t *testing.T) {
 	ctx := context.Background()
 	client := fake.NewSimpleClientset(
@@ -231,6 +300,161 @@ func TestReconcileRejectsDuplicateHosts(t *testing.T) {
 		if _, err := client.NetworkingV1().Ingresses("apps").Get(ctx, name+"-headscale", metav1.GetOptions{}); err == nil {
 			t.Fatalf("unexpected implementation ingress for %s", name)
 		}
+	}
+}
+
+func TestReconcileRejectsExistingImplementationItDoesNotOwn(t *testing.T) {
+	ctx := context.Background()
+	conflicting := sourceIngress("apps", "whoami-headscale", "other.cluster.example", "traefik-internal")
+	conflicting.Labels = map[string]string{"app.kubernetes.io/name": "someone-else"}
+	client := fake.NewSimpleClientset(
+		namespace("apps"),
+		namespace("headscale"),
+		sourceIngress("apps", "whoami", "whoami.cluster.example", "headscale"),
+		conflicting,
+	)
+
+	reconciler := Reconciler{
+		Client: client,
+		Config: Config{
+			AllowedZones:         []string{"cluster.example"},
+			DefaultTargetIPs:     []string{"100.64.0.10"},
+			HeadscaleNamespace:   "headscale",
+			RecordsConfigMapName: "headscale-extra-records",
+			RecordsConfigMapKey:  "extra-records.json",
+		},
+	}
+
+	summary, err := reconciler.Reconcile(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(summary.Skipped) != 1 || summary.ImplementationIngresses != 0 || summary.Records != 0 {
+		t.Fatalf("unexpected summary: %+v", summary)
+	}
+
+	updated, err := client.NetworkingV1().Ingresses("apps").Get(ctx, "whoami", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Annotations[statusAnnotation] != statusRejected {
+		t.Fatalf("source status = %q", updated.Annotations[statusAnnotation])
+	}
+
+	existing, err := client.NetworkingV1().Ingresses("apps").Get(ctx, "whoami-headscale", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if existing.Labels["app.kubernetes.io/name"] != "someone-else" {
+		t.Fatalf("conflicting ingress was overwritten: %#v", existing.Labels)
+	}
+}
+
+func TestReconcileAdoptsImplementationAfterSourceRecreate(t *testing.T) {
+	ctx := context.Background()
+	oldSource := sourceIngress("apps", "whoami", "whoami.cluster.example", "headscale")
+	oldSource.UID = types.UID("old-source-uid")
+	existing := implementationIngressFor(*oldSource, Config{}.withDefaults())
+	newSource := sourceIngress("apps", "whoami", "whoami.cluster.example", "headscale")
+	newSource.UID = types.UID("new-source-uid")
+
+	client := fake.NewSimpleClientset(
+		namespace("apps"),
+		namespace("headscale"),
+		newSource,
+		&existing,
+	)
+
+	reconciler := Reconciler{
+		Client: client,
+		Config: Config{
+			AllowedZones:         []string{"cluster.example"},
+			DefaultTargetIPs:     []string{"100.64.0.10"},
+			HeadscaleNamespace:   "headscale",
+			RecordsConfigMapName: "headscale-extra-records",
+			RecordsConfigMapKey:  "extra-records.json",
+		},
+	}
+
+	summary, err := reconciler.Reconcile(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.ImplementationIngresses != 1 || summary.Records != 1 {
+		t.Fatalf("unexpected summary: %+v", summary)
+	}
+
+	updated, err := client.NetworkingV1().Ingresses("apps").Get(ctx, "whoami-headscale", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := updated.OwnerReferences[0].UID; got != newSource.UID {
+		t.Fatalf("owner UID = %q, want %q", got, newSource.UID)
+	}
+}
+
+func TestReconcileRefusesUnmanagedRecordsConfigMap(t *testing.T) {
+	ctx := context.Background()
+	client := fake.NewSimpleClientset(
+		namespace("headscale"),
+		&corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "headscale-extra-records",
+				Namespace: "headscale",
+			},
+			Data: map[string]string{"extra-records.json": "[]\n"},
+		},
+	)
+
+	reconciler := Reconciler{
+		Client: client,
+		Config: Config{
+			HeadscaleNamespace:   "headscale",
+			RecordsConfigMapName: "headscale-extra-records",
+			RecordsConfigMapKey:  "extra-records.json",
+		},
+	}
+
+	if _, err := reconciler.Reconcile(ctx); err == nil {
+		t.Fatal("expected unmanaged records ConfigMap to be rejected")
+	}
+}
+
+func TestReconcileRejectsInvalidConfig(t *testing.T) {
+	tests := map[string]Config{
+		"invalid default target": {
+			SourceClassName:                "headscale",
+			ImplementationIngressClassName: "traefik-internal",
+			DefaultTargetIPs:               []string{"not-an-ip"},
+		},
+		"invalid static record": {
+			SourceClassName:                "headscale",
+			ImplementationIngressClassName: "traefik-internal",
+			StaticRecords:                  []DNSRecord{{Name: "bad.cluster.example", Type: "CNAME", Value: "target.cluster.example"}},
+		},
+		"static record outside allowed zone": {
+			SourceClassName:                "headscale",
+			ImplementationIngressClassName: "traefik-internal",
+			AllowedZones:                   []string{"cluster.example"},
+			StaticRecords:                  []DNSRecord{{Name: "bad.other.example", Type: "A", Value: "100.64.0.10"}},
+		},
+		"invalid allowed zone": {
+			SourceClassName:                "headscale",
+			ImplementationIngressClassName: "traefik-internal",
+			AllowedZones:                   []string{"bad_zone.example"},
+		},
+	}
+
+	for name, config := range tests {
+		t.Run(name, func(t *testing.T) {
+			reconciler := Reconciler{
+				Client: fake.NewSimpleClientset(),
+				Config: config,
+			}
+			if _, err := reconciler.Reconcile(context.Background()); err == nil {
+				t.Fatal("expected config validation error")
+			}
+		})
 	}
 }
 

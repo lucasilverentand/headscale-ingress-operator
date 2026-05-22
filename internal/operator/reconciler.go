@@ -5,8 +5,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"net/netip"
 	"sort"
 	"strings"
 
@@ -15,6 +15,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/kubernetes"
 )
 
@@ -32,6 +33,8 @@ const (
 	statusRejected       = "Rejected"
 )
 
+var errImplementationConflict = errors.New("implementation ingress already exists but is not managed by this source")
+
 type Reconciler struct {
 	Client kubernetes.Interface
 	Config Config
@@ -46,12 +49,12 @@ type Summary struct {
 }
 
 func (reconciler Reconciler) Reconcile(ctx context.Context) (Summary, error) {
-	config := reconciler.Config.withDefaults()
+	config, err := reconciler.Config.validated()
+	if err != nil {
+		return Summary{}, err
+	}
 	if reconciler.Client == nil {
 		return Summary{}, fmt.Errorf("kubernetes client is required")
-	}
-	if config.SourceClassName == config.ImplementationIngressClassName {
-		return Summary{}, fmt.Errorf("source and implementation ingress classes must differ")
 	}
 
 	list, err := reconciler.Client.NetworkingV1().Ingresses("").List(ctx, metav1.ListOptions{})
@@ -115,6 +118,13 @@ func (reconciler Reconciler) Reconcile(ctx context.Context) (Summary, error) {
 		activeImplementations[namespacedName(implementation.Namespace, implementation.Name)] = struct{}{}
 		applied, err := reconciler.applyImplementationIngress(ctx, implementation)
 		if err != nil {
+			if errors.Is(err, errImplementationConflict) {
+				summary.Skipped = append(summary.Skipped, sourceID+": "+err.Error())
+				if markErr := reconciler.markSource(ctx, source, statusRejected, nil); markErr != nil {
+					return summary, markErr
+				}
+				continue
+			}
 			return summary, fmt.Errorf("apply implementation ingress %s/%s: %w", implementation.Namespace, implementation.Name, err)
 		}
 		summary.ImplementationIngresses++
@@ -141,7 +151,7 @@ func (reconciler Reconciler) Reconcile(ctx context.Context) (Summary, error) {
 		}
 	}
 
-	deleted, err := reconciler.deleteStaleImplementations(ctx, list.Items, activeImplementations)
+	deleted, err := reconciler.deleteStaleImplementations(ctx, config, list.Items, activeImplementations)
 	if err != nil {
 		return summary, err
 	}
@@ -155,10 +165,10 @@ func (reconciler Reconciler) Reconcile(ctx context.Context) (Summary, error) {
 	return summary, nil
 }
 
-func (reconciler Reconciler) deleteStaleImplementations(ctx context.Context, ingresses []networkingv1.Ingress, active map[types.NamespacedName]struct{}) (int, error) {
+func (reconciler Reconciler) deleteStaleImplementations(ctx context.Context, config Config, ingresses []networkingv1.Ingress, active map[types.NamespacedName]struct{}) (int, error) {
 	deleted := 0
 	for _, ingress := range ingresses {
-		if !isManagedImplementation(ingress) {
+		if !isManagedImplementation(ingress, config) {
 			continue
 		}
 		key := namespacedName(ingress.Namespace, ingress.Name)
@@ -173,14 +183,20 @@ func (reconciler Reconciler) deleteStaleImplementations(ctx context.Context, ing
 	return deleted, nil
 }
 
-func isManagedImplementation(ingress networkingv1.Ingress) bool {
+func isManagedImplementation(ingress networkingv1.Ingress, config Config) bool {
 	if ingress.Labels[managedByLabel] != managedByValue {
 		return false
 	}
 	if ingress.Labels[sourceNamespaceLabel] == "" || ingress.Labels[sourceNameLabel] == "" {
 		return false
 	}
-	return ingress.Labels[sourceNamespaceLabel] == ingress.Namespace
+	if ingress.Labels[sourceNamespaceLabel] != ingress.Namespace {
+		return false
+	}
+	if ingress.Name != generatedIngressName(ingress.Labels[sourceNameLabel], config.ImplementationNameSuffix) {
+		return false
+	}
+	return hasControllerOwnerReference(ingress, ingress.Labels[sourceNameLabel])
 }
 
 func implementationIngressFor(source networkingv1.Ingress, config Config) networkingv1.Ingress {
@@ -233,6 +249,9 @@ func (reconciler Reconciler) applyImplementationIngress(ctx context.Context, des
 	if err != nil {
 		return nil, err
 	}
+	if !canUpdateImplementation(*existing, desired) {
+		return nil, fmt.Errorf("%w: %s/%s", errImplementationConflict, existing.Namespace, existing.Name)
+	}
 
 	copy := existing.DeepCopy()
 	copy.Labels = desired.Labels
@@ -260,10 +279,6 @@ func (reconciler Reconciler) markSource(ctx context.Context, source networkingv1
 		return fmt.Errorf("patch source ingress annotation %s/%s: %w", source.Namespace, source.Name, err)
 	}
 
-	if len(targets) == 0 {
-		return nil
-	}
-
 	statusIngresses := make([]map[string]string, 0, len(targets))
 	for _, target := range targets {
 		statusIngresses = append(statusIngresses, map[string]string{"ip": target})
@@ -282,6 +297,26 @@ func (reconciler Reconciler) markSource(ctx context.Context, source networkingv1
 		return fmt.Errorf("patch source ingress status %s/%s: %w", source.Namespace, source.Name, err)
 	}
 	return nil
+}
+
+func canUpdateImplementation(existing networkingv1.Ingress, desired networkingv1.Ingress) bool {
+	if existing.Labels[managedByLabel] != managedByValue {
+		return false
+	}
+	if existing.Labels[sourceNamespaceLabel] != desired.Labels[sourceNamespaceLabel] {
+		return false
+	}
+	if existing.Labels[sourceNameLabel] != desired.Labels[sourceNameLabel] {
+		return false
+	}
+	for _, owner := range existing.OwnerReferences {
+		if owner.Controller != nil && *owner.Controller {
+			return owner.APIVersion == "networking.k8s.io/v1" &&
+				owner.Kind == "Ingress" &&
+				owner.Name == desired.Labels[sourceNameLabel]
+		}
+	}
+	return len(desired.OwnerReferences) == 0
 }
 
 func (reconciler Reconciler) publishRecords(ctx context.Context, config Config, records []DNSRecord) error {
@@ -308,6 +343,9 @@ func (reconciler Reconciler) publishRecords(ctx context.Context, config Config, 
 	}
 	if err != nil {
 		return err
+	}
+	if existing.Labels[managedByLabel] != managedByValue {
+		return fmt.Errorf("refusing to update ConfigMap %s/%s without %s=%s label", config.HeadscaleNamespace, config.RecordsConfigMapName, managedByLabel, managedByValue)
 	}
 
 	copy := existing.DeepCopy()
@@ -348,7 +386,7 @@ func hostsForIngress(ingress networkingv1.Ingress) []string {
 
 func firstDisallowedHost(hosts []string, zones []string) string {
 	for _, host := range hosts {
-		if strings.Contains(host, "*") || !hostAllowed(host, zones) {
+		if strings.Contains(host, "*") || len(validation.IsDNS1123Subdomain(host)) > 0 || !hostAllowed(host, zones) {
 			return host
 		}
 	}
@@ -394,23 +432,7 @@ func targetIPsFor(source networkingv1.Ingress, implementation networkingv1.Ingre
 		candidates = append(candidates, defaults...)
 	}
 
-	seen := map[string]struct{}{}
-	var targets []string
-	for _, candidate := range candidates {
-		candidate = strings.TrimSpace(candidate)
-		if candidate == "" {
-			continue
-		}
-		if _, err := netip.ParseAddr(candidate); err != nil {
-			continue
-		}
-		if _, ok := seen[candidate]; ok {
-			continue
-		}
-		seen[candidate] = struct{}{}
-		targets = append(targets, candidate)
-	}
-	sort.Strings(targets)
+	targets, _ := normalizeIPs(candidates)
 	return targets
 }
 
@@ -432,6 +454,17 @@ func generatedIngressName(sourceName string, suffix string) string {
 		return hash
 	}
 	return prefix + "-" + hash
+}
+
+func hasControllerOwnerReference(ingress networkingv1.Ingress, sourceName string) bool {
+	for _, owner := range ingress.OwnerReferences {
+		if owner.Controller != nil && *owner.Controller {
+			return owner.APIVersion == "networking.k8s.io/v1" &&
+				owner.Kind == "Ingress" &&
+				owner.Name == sourceName
+		}
+	}
+	return false
 }
 
 func ptr[T any](value T) *T {
