@@ -41,6 +41,26 @@ func main() {
 	flag.StringVar(&defaultTargets, "default-targets", "", "Comma-separated fallback A/AAAA targets when generated Ingress status is empty.")
 	flag.Parse()
 
+	if interval <= 0 {
+		slog.Error("reconcile interval must be positive", "interval", interval)
+		os.Exit(1)
+	}
+
+	operatorConfig := operator.Config{
+		SourceClassName:                sourceClass,
+		ImplementationIngressClassName: implementationClass,
+		ImplementationNameSuffix:       implementationSuffix,
+		HeadscaleNamespace:             headscaleNamespace,
+		RecordsConfigMapName:           recordsConfigMap,
+		RecordsConfigMapKey:            recordsKey,
+		AllowedZones:                   splitCSV(allowedZones),
+		DefaultTargetIPs:               splitCSV(defaultTargets),
+	}
+	if err := operatorConfig.Validate(); err != nil {
+		slog.Error("invalid configuration", "error", err)
+		os.Exit(1)
+	}
+
 	client, err := kubernetes.NewForConfig(kubernetesConfig(kubeconfig))
 	if err != nil {
 		slog.Error("create Kubernetes client", "error", err)
@@ -49,16 +69,7 @@ func main() {
 
 	reconciler := operator.Reconciler{
 		Client: client,
-		Config: operator.Config{
-			SourceClassName:                sourceClass,
-			ImplementationIngressClassName: implementationClass,
-			ImplementationNameSuffix:       implementationSuffix,
-			HeadscaleNamespace:             headscaleNamespace,
-			RecordsConfigMapName:           recordsConfigMap,
-			RecordsConfigMapKey:            recordsKey,
-			AllowedZones:                   splitCSV(allowedZones),
-			DefaultTargetIPs:               splitCSV(defaultTargets),
-		},
+		Config: operatorConfig,
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)

@@ -1,4 +1,4 @@
-.PHONY: build test verify manifests
+.PHONY: build test vet verify manifests
 
 build:
 	go build ./cmd/operator
@@ -6,7 +6,10 @@ build:
 test:
 	go test ./...
 
+vet:
+	go vet ./...
+
 manifests:
 	kubectl kustomize deploy >/dev/null
 
-verify: test build manifests
+verify: test vet build manifests

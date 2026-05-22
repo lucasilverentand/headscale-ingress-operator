@@ -20,17 +20,18 @@ import (
 )
 
 const (
-	managedByValue       = "headscale-ingress-operator"
-	sourceNamespaceLabel = "headscale.silverswarm.io/source-namespace"
-	sourceNameLabel      = "headscale.silverswarm.io/source-name"
-	statusAnnotation     = "headscale.silverswarm.io/status"
-	publishAnnotation    = "headscale.silverswarm.io/publish"
-	targetIPAnnotation   = "headscale.silverswarm.io/target-ip"
-	externalDNSExclude   = "external-dns.alpha.kubernetes.io/exclude"
-	managedByLabel       = "app.kubernetes.io/managed-by"
-	statusReady          = "Ready"
-	statusImplemented    = "Implemented"
-	statusRejected       = "Rejected"
+	managedByValue            = "headscale-ingress-operator"
+	sourceNamespaceAnnotation = "headscale.silverswarm.io/source-namespace"
+	sourceNameAnnotation      = "headscale.silverswarm.io/source-name"
+	sourceUIDAnnotation       = "headscale.silverswarm.io/source-uid"
+	statusAnnotation          = "headscale.silverswarm.io/status"
+	publishAnnotation         = "headscale.silverswarm.io/publish"
+	targetIPAnnotation        = "headscale.silverswarm.io/target-ip"
+	externalDNSExclude        = "external-dns.alpha.kubernetes.io/exclude"
+	managedByLabel            = "app.kubernetes.io/managed-by"
+	statusReady               = "Ready"
+	statusImplemented         = "Implemented"
+	statusRejected            = "Rejected"
 )
 
 var errImplementationConflict = errors.New("implementation ingress already exists but is not managed by this source")
@@ -46,6 +47,12 @@ type Summary struct {
 	DeletedImplementations  int
 	Records                 int
 	Skipped                 []string
+}
+
+type sourceMark struct {
+	source  networkingv1.Ingress
+	status  string
+	targets []string
 }
 
 func (reconciler Reconciler) Reconcile(ctx context.Context) (Summary, error) {
@@ -64,6 +71,7 @@ func (reconciler Reconciler) Reconcile(ctx context.Context) (Summary, error) {
 
 	summary := Summary{}
 	records := append([]DNSRecord{}, config.StaticRecords...)
+	readyMarks := []sourceMark{}
 	activeImplementations := map[types.NamespacedName]struct{}{}
 	hostOwners := map[string]map[string]struct{}{}
 
@@ -98,8 +106,8 @@ func (reconciler Reconciler) Reconcile(ctx context.Context) (Summary, error) {
 			continue
 		}
 
-		if invalidHost := firstDisallowedHost(hosts, config.AllowedZones); invalidHost != "" {
-			summary.Skipped = append(summary.Skipped, sourceID+": host "+invalidHost+" is outside allowed zones")
+		if invalidHost, reason := firstRejectedHost(hosts, config.AllowedZones); invalidHost != "" {
+			summary.Skipped = append(summary.Skipped, sourceID+": host "+invalidHost+" "+reason)
 			if err := reconciler.markSource(ctx, source, statusRejected, nil); err != nil {
 				return summary, err
 			}
@@ -108,6 +116,23 @@ func (reconciler Reconciler) Reconcile(ctx context.Context) (Summary, error) {
 
 		if conflictingHost := firstConflictingHost(hosts, hostOwners, sourceID); conflictingHost != "" {
 			summary.Skipped = append(summary.Skipped, sourceID+": host "+conflictingHost+" is claimed by another headscale ingress")
+			if err := reconciler.markSource(ctx, source, statusRejected, nil); err != nil {
+				return summary, err
+			}
+			continue
+		}
+
+		if _, _, err := explicitTargetIPsFor(source); err != nil {
+			summary.Skipped = append(summary.Skipped, sourceID+": "+err.Error())
+			if err := reconciler.markSource(ctx, source, statusRejected, nil); err != nil {
+				return summary, err
+			}
+			continue
+		}
+
+		publish, err := publishEnabled(source)
+		if err != nil {
+			summary.Skipped = append(summary.Skipped, sourceID+": "+err.Error())
 			if err := reconciler.markSource(ctx, source, statusRejected, nil); err != nil {
 				return summary, err
 			}
@@ -129,14 +154,21 @@ func (reconciler Reconciler) Reconcile(ctx context.Context) (Summary, error) {
 		}
 		summary.ImplementationIngresses++
 
-		if source.Annotations[publishAnnotation] == "false" {
+		if !publish {
 			if err := reconciler.markSource(ctx, source, statusImplemented, nil); err != nil {
 				return summary, err
 			}
 			continue
 		}
 
-		targets := targetIPsFor(source, *applied, config.DefaultTargetIPs)
+		targets, err := targetIPsFor(source, *applied, config.DefaultTargetIPs)
+		if err != nil {
+			summary.Skipped = append(summary.Skipped, sourceID+": "+err.Error())
+			if err := reconciler.markSource(ctx, source, statusRejected, nil); err != nil {
+				return summary, err
+			}
+			continue
+		}
 		if len(targets) == 0 {
 			summary.Skipped = append(summary.Skipped, sourceID+": no A/AAAA target resolved")
 			if err := reconciler.markSource(ctx, source, statusImplemented, nil); err != nil {
@@ -146,9 +178,7 @@ func (reconciler Reconciler) Reconcile(ctx context.Context) (Summary, error) {
 		}
 
 		records = append(records, recordsFor(hosts, targets)...)
-		if err := reconciler.markSource(ctx, source, statusReady, targets); err != nil {
-			return summary, err
-		}
+		readyMarks = append(readyMarks, sourceMark{source: source, status: statusReady, targets: targets})
 	}
 
 	deleted, err := reconciler.deleteStaleImplementations(ctx, config, list.Items, activeImplementations)
@@ -160,6 +190,11 @@ func (reconciler Reconciler) Reconcile(ctx context.Context) (Summary, error) {
 	records = dedupeRecords(records)
 	if err := reconciler.publishRecords(ctx, config, records); err != nil {
 		return summary, err
+	}
+	for _, mark := range readyMarks {
+		if err := reconciler.markSource(ctx, mark.source, mark.status, mark.targets); err != nil {
+			return summary, err
+		}
 	}
 	summary.Records = len(records)
 	return summary, nil
@@ -187,31 +222,39 @@ func isManagedImplementation(ingress networkingv1.Ingress, config Config) bool {
 	if ingress.Labels[managedByLabel] != managedByValue {
 		return false
 	}
-	if ingress.Labels[sourceNamespaceLabel] == "" || ingress.Labels[sourceNameLabel] == "" {
+	sourceNamespace := ingress.Annotations[sourceNamespaceAnnotation]
+	sourceName := ingress.Annotations[sourceNameAnnotation]
+	if sourceNamespace == "" || sourceName == "" {
 		return false
 	}
-	if ingress.Labels[sourceNamespaceLabel] != ingress.Namespace {
+	if sourceNamespace != ingress.Namespace {
 		return false
 	}
-	if ingress.Name != generatedIngressName(ingress.Labels[sourceNameLabel], config.ImplementationNameSuffix) {
+	if ingress.Name != generatedIngressName(sourceName, config.ImplementationNameSuffix) {
 		return false
 	}
-	return hasControllerOwnerReference(ingress, ingress.Labels[sourceNameLabel])
+	return hasMatchingControllerOwnerReference(ingress, sourceName)
 }
 
 func implementationIngressFor(source networkingv1.Ingress, config Config) networkingv1.Ingress {
 	labels := map[string]string{
-		managedByLabel:       managedByValue,
-		sourceNamespaceLabel: source.Namespace,
-		sourceNameLabel:      source.Name,
+		managedByLabel: managedByValue,
 	}
 	annotations := map[string]string{
-		externalDNSExclude: "true",
+		sourceNamespaceAnnotation: source.Namespace,
+		sourceNameAnnotation:      source.Name,
+		externalDNSExclude:        "true",
 	}
 	for key, value := range source.Annotations {
+		if skipSourceAnnotation(key) {
+			continue
+		}
 		annotations[key] = value
 	}
 	annotations[externalDNSExclude] = "true"
+	if source.UID != "" {
+		annotations[sourceUIDAnnotation] = string(source.UID)
+	}
 
 	spec := *source.Spec.DeepCopy()
 	spec.IngressClassName = &config.ImplementationIngressClassName
@@ -228,12 +271,11 @@ func implementationIngressFor(source networkingv1.Ingress, config Config) networ
 
 	if source.UID != "" {
 		implementation.OwnerReferences = []metav1.OwnerReference{{
-			APIVersion:         "networking.k8s.io/v1",
-			Kind:               "Ingress",
-			Name:               source.Name,
-			UID:                source.UID,
-			Controller:         ptr(true),
-			BlockOwnerDeletion: ptr(true),
+			APIVersion: "networking.k8s.io/v1",
+			Kind:       "Ingress",
+			Name:       source.Name,
+			UID:        source.UID,
+			Controller: ptr(true),
 		}}
 	}
 
@@ -275,6 +317,9 @@ func (reconciler Reconciler) markSource(ctx context.Context, source networkingv1
 		return err
 	}
 	_, err = client.Patch(ctx, source.Name, types.MergePatchType, metadataPatch, metav1.PatchOptions{})
+	if apierrors.IsNotFound(err) {
+		return nil
+	}
 	if err != nil {
 		return fmt.Errorf("patch source ingress annotation %s/%s: %w", source.Namespace, source.Name, err)
 	}
@@ -293,7 +338,9 @@ func (reconciler Reconciler) markSource(ctx context.Context, source networkingv1
 	if err != nil {
 		return err
 	}
-	if _, err := client.Patch(ctx, source.Name, types.MergePatchType, statusPatch, metav1.PatchOptions{}, "status"); err != nil {
+	if _, err := client.Patch(ctx, source.Name, types.MergePatchType, statusPatch, metav1.PatchOptions{}, "status"); apierrors.IsNotFound(err) {
+		return nil
+	} else if err != nil {
 		return fmt.Errorf("patch source ingress status %s/%s: %w", source.Namespace, source.Name, err)
 	}
 	return nil
@@ -303,20 +350,16 @@ func canUpdateImplementation(existing networkingv1.Ingress, desired networkingv1
 	if existing.Labels[managedByLabel] != managedByValue {
 		return false
 	}
-	if existing.Labels[sourceNamespaceLabel] != desired.Labels[sourceNamespaceLabel] {
+	if existing.Annotations[sourceNamespaceAnnotation] != desired.Annotations[sourceNamespaceAnnotation] {
 		return false
 	}
-	if existing.Labels[sourceNameLabel] != desired.Labels[sourceNameLabel] {
+	if existing.Annotations[sourceNameAnnotation] != desired.Annotations[sourceNameAnnotation] {
 		return false
 	}
-	for _, owner := range existing.OwnerReferences {
-		if owner.Controller != nil && *owner.Controller {
-			return owner.APIVersion == "networking.k8s.io/v1" &&
-				owner.Kind == "Ingress" &&
-				owner.Name == desired.Labels[sourceNameLabel]
-		}
+	if len(desired.OwnerReferences) == 0 {
+		return len(existing.OwnerReferences) == 0
 	}
-	return len(desired.OwnerReferences) == 0
+	return hasMatchingControllerOwnerReference(existing, desired.Annotations[sourceNameAnnotation])
 }
 
 func (reconciler Reconciler) publishRecords(ctx context.Context, config Config, records []DNSRecord) error {
@@ -339,10 +382,13 @@ func (reconciler Reconciler) publishRecords(ctx context.Context, config Config, 
 			},
 			Data: desiredData,
 		}, metav1.CreateOptions{})
-		return err
+		if err != nil {
+			return fmt.Errorf("create records ConfigMap %s/%s: %w", config.HeadscaleNamespace, config.RecordsConfigMapName, err)
+		}
+		return nil
 	}
 	if err != nil {
-		return err
+		return fmt.Errorf("get records ConfigMap %s/%s: %w", config.HeadscaleNamespace, config.RecordsConfigMapName, err)
 	}
 	if existing.Labels[managedByLabel] != managedByValue {
 		return fmt.Errorf("refusing to update ConfigMap %s/%s without %s=%s label", config.HeadscaleNamespace, config.RecordsConfigMapName, managedByLabel, managedByValue)
@@ -357,8 +403,10 @@ func (reconciler Reconciler) publishRecords(ctx context.Context, config Config, 
 		copy.Data = map[string]string{}
 	}
 	copy.Data[config.RecordsConfigMapKey] = payload
-	_, err = client.Update(ctx, copy, metav1.UpdateOptions{})
-	return err
+	if _, err = client.Update(ctx, copy, metav1.UpdateOptions{}); err != nil {
+		return fmt.Errorf("update records ConfigMap %s/%s: %w", config.HeadscaleNamespace, config.RecordsConfigMapName, err)
+	}
+	return nil
 }
 
 func hostsForIngress(ingress networkingv1.Ingress) []string {
@@ -384,13 +432,19 @@ func hostsForIngress(ingress networkingv1.Ingress) []string {
 	return out
 }
 
-func firstDisallowedHost(hosts []string, zones []string) string {
+func firstRejectedHost(hosts []string, zones []string) (string, string) {
 	for _, host := range hosts {
-		if strings.Contains(host, "*") || len(validation.IsDNS1123Subdomain(host)) > 0 || !hostAllowed(host, zones) {
-			return host
+		if strings.Contains(host, "*") {
+			return host, "uses unsupported wildcard DNS"
+		}
+		if len(validation.IsDNS1123Subdomain(host)) > 0 {
+			return host, "is not a valid DNS host"
+		}
+		if !hostAllowed(host, zones) {
+			return host, "is outside allowed zones"
 		}
 	}
-	return ""
+	return "", ""
 }
 
 func firstConflictingHost(hosts []string, hostOwners map[string]map[string]struct{}, sourceID string) string {
@@ -419,21 +473,56 @@ func hostAllowed(host string, zones []string) bool {
 	return false
 }
 
-func targetIPsFor(source networkingv1.Ingress, implementation networkingv1.Ingress, defaults []string) []string {
+func targetIPsFor(source networkingv1.Ingress, implementation networkingv1.Ingress, defaults []string) ([]string, error) {
 	var candidates []string
-	if source.Annotations[targetIPAnnotation] != "" {
-		candidates = strings.Split(source.Annotations[targetIPAnnotation], ",")
+	if targets, ok, err := explicitTargetIPsFor(source); ok || err != nil {
+		return targets, err
 	} else {
 		for _, item := range implementation.Status.LoadBalancer.Ingress {
 			if item.IP != "" {
-				candidates = append(candidates, item.IP)
+				targets, err := normalizeIPs([]string{item.IP})
+				if err == nil {
+					candidates = append(candidates, targets...)
+				}
 			}
 		}
-		candidates = append(candidates, defaults...)
+		if len(candidates) == 0 {
+			candidates = append(candidates, defaults...)
+		}
 	}
 
 	targets, _ := normalizeIPs(candidates)
-	return targets
+	return targets, nil
+}
+
+func explicitTargetIPsFor(source networkingv1.Ingress) ([]string, bool, error) {
+	raw := strings.TrimSpace(source.Annotations[targetIPAnnotation])
+	if raw == "" {
+		return nil, false, nil
+	}
+	targets, err := normalizeIPs(strings.Split(raw, ","))
+	if err != nil {
+		return nil, true, fmt.Errorf("invalid target IP annotation: %w", err)
+	}
+	if len(targets) == 0 {
+		return nil, true, fmt.Errorf("invalid target IP annotation: must contain at least one IP")
+	}
+	return targets, true, nil
+}
+
+func publishEnabled(source networkingv1.Ingress) (bool, error) {
+	raw := strings.TrimSpace(source.Annotations[publishAnnotation])
+	if raw == "" {
+		return true, nil
+	}
+	switch strings.ToLower(raw) {
+	case "true":
+		return true, nil
+	case "false":
+		return false, nil
+	default:
+		return false, fmt.Errorf("invalid publish annotation: must be true or false")
+	}
 }
 
 func generatedIngressName(sourceName string, suffix string) string {
@@ -449,22 +538,41 @@ func generatedIngressName(sourceName string, suffix string) string {
 		return hash
 	}
 
-	prefix := strings.TrimRight(sourceName[:min(len(sourceName), maxPrefix)], "-")
+	prefix := strings.TrimRight(sourceName[:min(len(sourceName), maxPrefix)], "-.")
 	if prefix == "" {
 		return hash
 	}
 	return prefix + "-" + hash
 }
 
-func hasControllerOwnerReference(ingress networkingv1.Ingress, sourceName string) bool {
+func hasMatchingControllerOwnerReference(ingress networkingv1.Ingress, sourceName string) bool {
+	sourceUID := ingress.Annotations[sourceUIDAnnotation]
+	if sourceUID == "" {
+		return false
+	}
 	for _, owner := range ingress.OwnerReferences {
 		if owner.Controller != nil && *owner.Controller {
 			return owner.APIVersion == "networking.k8s.io/v1" &&
 				owner.Kind == "Ingress" &&
-				owner.Name == sourceName
+				owner.Name == sourceName &&
+				string(owner.UID) == sourceUID
 		}
 	}
 	return false
+}
+
+func skipSourceAnnotation(key string) bool {
+	switch key {
+	case sourceNamespaceAnnotation, sourceNameAnnotation, sourceUIDAnnotation, statusAnnotation, publishAnnotation, targetIPAnnotation,
+		externalDNSExclude, "kubectl.kubernetes.io/last-applied-configuration":
+		return true
+	default:
+		return strings.HasPrefix(key, "argocd.argoproj.io/") ||
+			strings.HasPrefix(key, "external-dns.alpha.kubernetes.io/") ||
+			strings.HasPrefix(key, "helm.sh/") ||
+			strings.HasPrefix(key, "kustomize.toolkit.fluxcd.io/") ||
+			strings.HasPrefix(key, "meta.helm.sh/")
+	}
 }
 
 func ptr[T any](value T) *T {

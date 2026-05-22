@@ -20,7 +20,7 @@ func recordsFor(hosts []string, targets []string) []DNSRecord {
 	for _, host := range hosts {
 		for _, target := range targets {
 			address, err := netip.ParseAddr(target)
-			if err != nil {
+			if err != nil || !usableAddress(address) {
 				continue
 			}
 			recordType := "A"
@@ -30,7 +30,7 @@ func recordsFor(hosts []string, targets []string) []DNSRecord {
 			records = append(records, DNSRecord{
 				Name:  normalizeHost(host),
 				Type:  recordType,
-				Value: target,
+				Value: address.String(),
 			})
 		}
 	}
@@ -88,6 +88,9 @@ func normalizeRecord(record DNSRecord) (DNSRecord, bool) {
 
 	address, err := netip.ParseAddr(strings.TrimSpace(record.Value))
 	if err != nil {
+		return DNSRecord{}, false
+	}
+	if !usableAddress(address) {
 		return DNSRecord{}, false
 	}
 

@@ -20,6 +20,11 @@ type Config struct {
 	StaticRecords                  []DNSRecord
 }
 
+func (config Config) Validate() error {
+	_, err := config.validated()
+	return err
+}
+
 func (config Config) withDefaults() Config {
 	config.SourceClassName = strings.TrimSpace(config.SourceClassName)
 	config.ImplementationIngressClassName = strings.TrimSpace(config.ImplementationIngressClassName)
@@ -51,8 +56,26 @@ func (config Config) withDefaults() Config {
 
 func (config Config) validated() (Config, error) {
 	config = config.withDefaults()
+	if err := validateDNS1123Subdomain("source ingress class", config.SourceClassName); err != nil {
+		return Config{}, err
+	}
+	if err := validateDNS1123Subdomain("implementation ingress class", config.ImplementationIngressClassName); err != nil {
+		return Config{}, err
+	}
 	if config.SourceClassName == config.ImplementationIngressClassName {
 		return Config{}, fmt.Errorf("source and implementation ingress classes must differ")
+	}
+	if err := validateImplementationSuffix(config.ImplementationNameSuffix); err != nil {
+		return Config{}, err
+	}
+	if err := validateDNS1123Label("headscale namespace", config.HeadscaleNamespace); err != nil {
+		return Config{}, err
+	}
+	if err := validateDNS1123Subdomain("records ConfigMap name", config.RecordsConfigMapName); err != nil {
+		return Config{}, err
+	}
+	if errs := validation.IsConfigMapKey(config.RecordsConfigMapKey); len(errs) > 0 {
+		return Config{}, fmt.Errorf("records ConfigMap key %q is invalid: %s", config.RecordsConfigMapKey, strings.Join(errs, "; "))
 	}
 
 	zones, err := normalizeZones(config.AllowedZones)
@@ -79,6 +102,27 @@ func (config Config) validated() (Config, error) {
 	}
 	config.StaticRecords = staticRecords
 	return config, nil
+}
+
+func validateDNS1123Subdomain(field string, value string) error {
+	if errs := validation.IsDNS1123Subdomain(value); len(errs) > 0 {
+		return fmt.Errorf("%s %q is invalid: %s", field, value, strings.Join(errs, "; "))
+	}
+	return nil
+}
+
+func validateDNS1123Label(field string, value string) error {
+	if errs := validation.IsDNS1123Label(value); len(errs) > 0 {
+		return fmt.Errorf("%s %q is invalid: %s", field, value, strings.Join(errs, "; "))
+	}
+	return nil
+}
+
+func validateImplementationSuffix(suffix string) error {
+	if errs := validation.IsDNS1123Subdomain("source" + suffix); len(errs) > 0 {
+		return fmt.Errorf("implementation name suffix %q is invalid: %s", suffix, strings.Join(errs, "; "))
+	}
+	return nil
 }
 
 func normalizeZones(zones []string) ([]string, error) {
@@ -114,6 +158,9 @@ func normalizeIPs(values []string) ([]string, error) {
 		if err != nil {
 			return nil, fmt.Errorf("%q is not an IP address", value)
 		}
+		if !usableAddress(address) {
+			return nil, fmt.Errorf("%q is not a usable DNS target", value)
+		}
 		value = address.String()
 		if _, ok := seen[value]; ok {
 			continue
@@ -122,4 +169,8 @@ func normalizeIPs(values []string) ([]string, error) {
 		out = append(out, value)
 	}
 	return out, nil
+}
+
+func usableAddress(address netip.Addr) bool {
+	return !address.IsUnspecified() && !address.IsMulticast()
 }

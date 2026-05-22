@@ -16,10 +16,19 @@ spec:
         app.kubernetes.io/name: headscale-ingress-operator
     spec:
       serviceAccountName: headscale-ingress-operator
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: operator
           image: headscale-ingress-operator:local
           imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
           args:
             - --source-class=headscale
             - --implementation-class=traefik-internal

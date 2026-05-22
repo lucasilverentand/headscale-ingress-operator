@@ -124,7 +124,9 @@ Implementation renderer:
   match clusters that already standardize on Traefik CRDs
 - all generated implementation resources include
   `external-dns.alpha.kubernetes.io/exclude: "true"` by default
-- generated resources are owned by the source Ingress
+- generated resources are owned by the source Ingress and carry source identity
+  annotations; the operator requires those annotations plus the controller owner
+  reference to match before it updates or deletes an existing implementation
 
 Headscale DNS reconciler:
 
@@ -252,8 +254,8 @@ Useful annotations on source Ingresses:
 | Annotation | Purpose |
 | --- | --- |
 | `headscale.silverswarm.io/implementation-kind` | Override renderer, such as `Ingress` or `TraefikIngressRoute`. |
-| `headscale.silverswarm.io/target-ip` | Explicit DNS target for unusual migrations. Must be an IP. |
-| `headscale.silverswarm.io/publish: "false"` | Create implementation ingress but skip Headscale DNS. |
+| `headscale.silverswarm.io/target-ip` | Explicit comma-separated DNS targets for unusual migrations. Values must be usable A/AAAA IPs. |
+| `headscale.silverswarm.io/publish: "false"` | Boolean flag. `false` creates the implementation ingress but skips Headscale DNS. |
 | `headscale.silverswarm.io/tls-secret` | Override default TLS secret for the implementation resource. |
 
 Avoid annotations for credentials. API keys, auth keys, and Headscale connection
@@ -293,6 +295,7 @@ DNS publication must be restricted:
 - require an allowlist of zones
 - reject wildcard hosts
 - reject CNAMEs and hostnames as values
+- reject unspecified or multicast IP targets
 - lowercase and normalize names before writing JSON
 - refuse to publish an Ingress with no host
 - emit a clear condition when a host is outside policy

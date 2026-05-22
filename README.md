@@ -35,6 +35,8 @@ Implemented:
 - public DNS suppression on generated resources
 - Headscale `extra_records_path` JSON written to an operator-owned ConfigMap
 - source Ingress status annotation and load balancer status updates
+- ownership checks that refuse ambiguous generated resources and unmanaged
+  records ConfigMaps
 - local fake Kubernetes API tests
 - deployable Kubernetes YAML under `deploy/`
 

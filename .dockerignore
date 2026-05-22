@@ -1,4 +1,7 @@
 .git
+.DS_Store
+.env
+/operator
 coverage
 dist
 node_modules
