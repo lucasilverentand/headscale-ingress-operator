@@ -1,0 +1,206 @@
+package operator
+
+import (
+	"context"
+	"encoding/json"
+	"testing"
+
+	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/kubernetes/fake"
+)
+
+func TestReconcileCreatesImplementationIngressAndHeadscaleRecords(t *testing.T) {
+	ctx := context.Background()
+	client := fake.NewSimpleClientset(
+		namespace("apps"),
+		namespace("headscale"),
+		sourceIngress("apps", "whoami", "whoami.cluster.example", "headscale"),
+	)
+
+	reconciler := Reconciler{
+		Client: client,
+		Config: Config{
+			AllowedZones:         []string{"cluster.example"},
+			DefaultTargetIPs:     []string{"100.64.0.10"},
+			StaticRecords:        []DNSRecord{{Name: "admin.cluster.example", Type: "A", Value: "100.64.0.20"}},
+			HeadscaleNamespace:   "headscale",
+			RecordsConfigMapName: "headscale-extra-records",
+			RecordsConfigMapKey:  "extra-records.json",
+		},
+	}
+
+	summary, err := reconciler.Reconcile(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.SourceIngresses != 1 || summary.ImplementationIngresses != 1 || summary.Records != 2 {
+		t.Fatalf("unexpected summary: %+v", summary)
+	}
+
+	implementation, err := client.NetworkingV1().Ingresses("apps").Get(ctx, "whoami-headscale", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := *implementation.Spec.IngressClassName; got != "traefik-internal" {
+		t.Fatalf("implementation class = %q", got)
+	}
+	if implementation.Annotations[externalDNSExclude] != "true" {
+		t.Fatalf("generated ingress should exclude external-dns: %#v", implementation.Annotations)
+	}
+
+	updatedSource, err := client.NetworkingV1().Ingresses("apps").Get(ctx, "whoami", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updatedSource.Annotations[statusAnnotation] != statusReady {
+		t.Fatalf("source status annotation = %q", updatedSource.Annotations[statusAnnotation])
+	}
+	if got := updatedSource.Status.LoadBalancer.Ingress[0].IP; got != "100.64.0.10" {
+		t.Fatalf("source status target = %q", got)
+	}
+
+	configMap, err := client.CoreV1().ConfigMaps("headscale").Get(ctx, "headscale-extra-records", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var records []DNSRecord
+	if err := json.Unmarshal([]byte(configMap.Data["extra-records.json"]), &records); err != nil {
+		t.Fatal(err)
+	}
+
+	want := []DNSRecord{
+		{Name: "admin.cluster.example", Type: "A", Value: "100.64.0.20"},
+		{Name: "whoami.cluster.example", Type: "A", Value: "100.64.0.10"},
+	}
+	if !recordsEqual(records, want) {
+		t.Fatalf("records = %#v, want %#v", records, want)
+	}
+}
+
+func TestReconcileRejectsHostsOutsideAllowedZones(t *testing.T) {
+	ctx := context.Background()
+	client := fake.NewSimpleClientset(
+		namespace("apps"),
+		namespace("headscale"),
+		sourceIngress("apps", "bad", "bad.other.example", "headscale"),
+	)
+
+	reconciler := Reconciler{
+		Client: client,
+		Config: Config{
+			AllowedZones:         []string{"cluster.example"},
+			DefaultTargetIPs:     []string{"100.64.0.10"},
+			HeadscaleNamespace:   "headscale",
+			RecordsConfigMapName: "headscale-extra-records",
+			RecordsConfigMapKey:  "extra-records.json",
+		},
+	}
+
+	summary, err := reconciler.Reconcile(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(summary.Skipped) != 1 {
+		t.Fatalf("expected one skipped ingress, got %+v", summary)
+	}
+
+	if _, err := client.NetworkingV1().Ingresses("apps").Get(ctx, "bad-headscale", metav1.GetOptions{}); err == nil {
+		t.Fatal("unexpected implementation ingress for rejected source")
+	}
+
+	configMap, err := client.CoreV1().ConfigMaps("headscale").Get(ctx, "headscale-extra-records", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if configMap.Data["extra-records.json"] != "[]\n" {
+		t.Fatalf("records = %q", configMap.Data["extra-records.json"])
+	}
+}
+
+func TestReconcileDeletesStaleImplementationIngress(t *testing.T) {
+	ctx := context.Background()
+	stale := implementationIngressFor(*sourceIngress("apps", "old", "old.cluster.example", "headscale"), Config{}.withDefaults())
+	client := fake.NewSimpleClientset(
+		namespace("apps"),
+		namespace("headscale"),
+		&stale,
+	)
+
+	reconciler := Reconciler{
+		Client: client,
+		Config: Config{
+			AllowedZones:         []string{"cluster.example"},
+			DefaultTargetIPs:     []string{"100.64.0.10"},
+			HeadscaleNamespace:   "headscale",
+			RecordsConfigMapName: "headscale-extra-records",
+			RecordsConfigMapKey:  "extra-records.json",
+		},
+	}
+
+	summary, err := reconciler.Reconcile(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.DeletedImplementations != 1 {
+		t.Fatalf("deleted implementations = %d", summary.DeletedImplementations)
+	}
+
+	if _, err := client.NetworkingV1().Ingresses("apps").Get(ctx, "old-headscale", metav1.GetOptions{}); err == nil {
+		t.Fatal("stale implementation ingress still exists")
+	}
+}
+
+func sourceIngress(namespace, name, host, class string) *networkingv1.Ingress {
+	pathType := networkingv1.PathTypePrefix
+	return &networkingv1.Ingress{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        name,
+			Namespace:   namespace,
+			UID:         types.UID(namespace + "-" + name),
+			Annotations: map[string]string{},
+		},
+		Spec: networkingv1.IngressSpec{
+			IngressClassName: &class,
+			TLS: []networkingv1.IngressTLS{{
+				Hosts:      []string{host},
+				SecretName: "wildcard-tls",
+			}},
+			Rules: []networkingv1.IngressRule{{
+				Host: host,
+				IngressRuleValue: networkingv1.IngressRuleValue{
+					HTTP: &networkingv1.HTTPIngressRuleValue{
+						Paths: []networkingv1.HTTPIngressPath{{
+							Path:     "/",
+							PathType: &pathType,
+							Backend: networkingv1.IngressBackend{
+								Service: &networkingv1.IngressServiceBackend{
+									Name: "whoami",
+									Port: networkingv1.ServiceBackendPort{Number: 80},
+								},
+							},
+						}},
+					},
+				},
+			}},
+		},
+	}
+}
+
+func namespace(name string) *corev1.Namespace {
+	return &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: name}}
+}
+
+func recordsEqual(left, right []DNSRecord) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for i := range left {
+		if left[i] != right[i] {
+			return false
+		}
+	}
+	return true
+}

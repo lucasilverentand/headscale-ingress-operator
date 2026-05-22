@@ -1,0 +1,36 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: headscale-ingress-operator
+  namespace: headscale-ingress-operator
+  labels:
+    app.kubernetes.io/name: headscale-ingress-operator
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: headscale-ingress-operator
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: headscale-ingress-operator
+    spec:
+      serviceAccountName: headscale-ingress-operator
+      containers:
+        - name: operator
+          image: ghcr.io/example/headscale-ingress-operator:latest
+          args:
+            - --source-class=headscale
+            - --implementation-class=traefik-internal
+            - --headscale-namespace=headscale
+            - --records-configmap=headscale-extra-records
+            - --records-key=extra-records.json
+            - --allowed-zones=cluster.example
+            - --default-targets=100.64.0.10
+          resources:
+            requests:
+              cpu: 25m
+              memory: 64Mi
+            limits:
+              cpu: 250m
+              memory: 128Mi
