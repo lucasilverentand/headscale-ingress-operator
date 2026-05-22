@@ -36,7 +36,6 @@ spec:
             - --records-configmap=headscale-extra-records
             - --records-key=extra-records.json
             - --allowed-zones=cluster.example
-            - --default-targets=100.64.0.10
           resources:
             requests:
               cpu: 25m

@@ -8,3 +8,8 @@ or patch the image to a registry you control.
 docker build -t headscale-ingress-operator:local .
 kubectl kustomize deploy
 ```
+
+Release builds are published as:
+
+- `ghcr.io/lucasilverentand/headscale-ingress-operator`
+- `oci://ghcr.io/lucasilverentand/charts/headscale-ingress-operator`

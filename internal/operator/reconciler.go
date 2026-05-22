@@ -21,12 +21,12 @@ import (
 
 const (
 	managedByValue            = "headscale-ingress-operator"
-	sourceNamespaceAnnotation = "headscale.silverswarm.io/source-namespace"
-	sourceNameAnnotation      = "headscale.silverswarm.io/source-name"
-	sourceUIDAnnotation       = "headscale.silverswarm.io/source-uid"
-	statusAnnotation          = "headscale.silverswarm.io/status"
-	publishAnnotation         = "headscale.silverswarm.io/publish"
-	targetIPAnnotation        = "headscale.silverswarm.io/target-ip"
+	sourceNamespaceAnnotation = "headscale-ingress-operator.lucasilverentand.dev/source-namespace"
+	sourceNameAnnotation      = "headscale-ingress-operator.lucasilverentand.dev/source-name"
+	sourceUIDAnnotation       = "headscale-ingress-operator.lucasilverentand.dev/source-uid"
+	statusAnnotation          = "headscale-ingress-operator.lucasilverentand.dev/status"
+	publishAnnotation         = "headscale-ingress-operator.lucasilverentand.dev/publish"
+	targetIPAnnotation        = "headscale-ingress-operator.lucasilverentand.dev/target-ip"
 	externalDNSExclude        = "external-dns.alpha.kubernetes.io/exclude"
 	managedByLabel            = "app.kubernetes.io/managed-by"
 	statusReady               = "Ready"

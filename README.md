@@ -23,8 +23,8 @@ steps, CRD/API shape, and migration notes for the existing cluster patterns.
 
 ## Current Status
 
-This repo is local/private for now. It is structured so it can become public
-later, but there is no publishing workflow or pushed remote state in this repo.
+This repo publishes release images and Helm charts from release-please managed
+GitHub releases.
 
 Implemented:
 
@@ -39,6 +39,8 @@ Implemented:
   records ConfigMaps
 - local fake Kubernetes API tests
 - deployable Kubernetes YAML under `deploy/`
+- Helm chart under `charts/headscale-ingress-operator`
+- container image publishing to `ghcr.io/lucasilverentand/headscale-ingress-operator`
 
 ## Local Development
 
@@ -75,3 +77,15 @@ kubectl kustomize deploy
 The default deployment image is `headscale-ingress-operator:local`. Build and
 load that image into your local test cluster, or patch the image to a private
 registry before applying the manifests.
+
+Install the published Helm chart:
+
+```bash
+helm install headscale-ingress-operator \
+  oci://ghcr.io/lucasilverentand/charts/headscale-ingress-operator \
+  --namespace headscale-ingress-operator \
+  --create-namespace
+```
+
+The chart defaults to `ghcr.io/lucasilverentand/headscale-ingress-operator`
+and uses the chart `appVersion` as the image tag unless `image.tag` is set.

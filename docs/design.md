@@ -76,9 +76,9 @@ provider. The important lesson is record ownership. This operator needs one
 clear owner for the Headscale dynamic records file and a domain allowlist so it
 does not take over unrelated names.
 
-## Cluster Patterns To Preserve
+## Common Cluster Patterns To Support
 
-The existing cluster repo points to these matching patterns:
+The operator should fit clusters with these common patterns:
 
 - templates are rendered through Kustodian and deployed by Flux, so the operator
   should be installable as a template with cluster-owned substitutions
@@ -87,9 +87,8 @@ The existing cluster repo points to these matching patterns:
 - private routes are marked so public external-dns does not publish them
 - Headscale already pushes DNS to mesh clients through MagicDNS and uses
   extra-records for exact host overrides
-- the current manual step is capturing a tailnet IP and copying it back into
-  cluster values
-- future app migrations prefer keeping tailnet access behavior close to the app
+- manual setups often capture a tailnet IP and copy it back into cluster values
+- app migrations work best when tailnet access behavior stays close to the app
   boundary and avoiding broad shared privilege
 
 This design keeps those lessons but removes the manual DNS/IP copy step.
@@ -103,7 +102,7 @@ The operator has four reconcilers.
 `IngressClass` bootstrap reconciler:
 
 - ensures an `IngressClass` named `headscale` exists
-- sets `spec.controller` to `headscale.silverswarm.io/ingress-controller`
+- sets `spec.controller` to `headscale-ingress-operator.lucasilverentand.dev/ingress-controller`
 - optionally marks it non-default so services must opt in deliberately
 
 Source Ingress reconciler:
@@ -201,8 +200,8 @@ The operator should support two target strategies.
   SNI/Host routing
 - works when clients cannot route to the cluster's internal load-balancer IPs
 
-`IngressStatus` should be the MVP because it is simpler and matches the existing
-Traefik plus subnet-router pattern. `TailnetGateway` is the escape hatch for
+`IngressStatus` should be the MVP because it is simpler and matches common
+Traefik plus subnet-router deployments. `TailnetGateway` is the escape hatch for
 clusters without routed access to the internal ingress endpoint.
 
 ### API Surface
@@ -213,7 +212,7 @@ operator-focused.
 Operator configuration:
 
 ```yaml
-apiVersion: headscale.silverswarm.io/v1alpha1
+apiVersion: headscale-ingress-operator.lucasilverentand.dev/v1alpha1
 kind: HeadscaleIngressConfig
 metadata:
   name: default
@@ -238,7 +237,7 @@ spec:
 Optional static record CRD:
 
 ```yaml
-apiVersion: headscale.silverswarm.io/v1alpha1
+apiVersion: headscale-ingress-operator.lucasilverentand.dev/v1alpha1
 kind: HeadscaleDNSRecord
 metadata:
   name: static-admin
@@ -253,10 +252,10 @@ Useful annotations on source Ingresses:
 
 | Annotation | Purpose |
 | --- | --- |
-| `headscale.silverswarm.io/implementation-kind` | Override renderer, such as `Ingress` or `TraefikIngressRoute`. |
-| `headscale.silverswarm.io/target-ip` | Explicit comma-separated DNS targets for unusual migrations. Values must be usable A/AAAA IPs. |
-| `headscale.silverswarm.io/publish: "false"` | Boolean flag. `false` creates the implementation ingress but skips Headscale DNS. |
-| `headscale.silverswarm.io/tls-secret` | Override default TLS secret for the implementation resource. |
+| `headscale-ingress-operator.lucasilverentand.dev/implementation-kind` | Override renderer, such as `Ingress` or `TraefikIngressRoute`. |
+| `headscale-ingress-operator.lucasilverentand.dev/target-ip` | Explicit comma-separated DNS targets for unusual migrations. Values must be usable A/AAAA IPs. |
+| `headscale-ingress-operator.lucasilverentand.dev/publish: "false"` | Boolean flag. `false` creates the implementation ingress but skips Headscale DNS. |
+| `headscale-ingress-operator.lucasilverentand.dev/tls-secret` | Override default TLS secret for the implementation resource. |
 
 Avoid annotations for credentials. API keys, auth keys, and Headscale connection
 settings belong in Secrets or the operator config.
@@ -327,7 +326,7 @@ DNS publication must be restricted:
 
    Replace the hand-written internal ingress route with a source Ingress using
    `ingressClassName: headscale`, or add the source Ingress next to the existing
-   route with `headscale.silverswarm.io/publish: "false"` until the generated
+   route with `headscale-ingress-operator.lucasilverentand.dev/publish: "false"` until the generated
    resource is confirmed. Then turn DNS publishing on.
 
 5. Verify from both Kubernetes and a tailnet client.
@@ -400,8 +399,8 @@ Cluster smoke test:
 - verify DNS resolves from a tailnet client
 - verify HTTPS reaches the service through the internal ingress path
 
-For the cluster repo, use its existing Kustodian validation commands after adding
-the template:
+For template-managed clusters, use the matching cluster validation commands
+after adding the template. For example:
 
 ```bash
 bunx kustodian validate --cluster <cluster-a>

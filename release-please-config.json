@@ -1,0 +1,23 @@
+{
+  "release-type": "go",
+  "include-component-in-tag": false,
+  "pull-request-header": "This release PR updates the changelog and versioned release files.",
+  "pull-request-footer": "Merging this PR lets the release workflow publish the container image and Helm chart.",
+  "packages": {
+    ".": {
+      "package-name": "headscale-ingress-operator",
+      "extra-files": [
+        {
+          "type": "yaml",
+          "path": "charts/headscale-ingress-operator/Chart.yaml",
+          "jsonpath": "$.version"
+        },
+        {
+          "type": "yaml",
+          "path": "charts/headscale-ingress-operator/Chart.yaml",
+          "jsonpath": "$.appVersion"
+        }
+      ]
+    }
+  }
+}

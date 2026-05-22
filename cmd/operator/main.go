@@ -11,7 +11,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/silverswarm/headscale-ingress-operator/internal/operator"
+	"github.com/lucasilverentand/headscale-ingress-operator/internal/operator"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"

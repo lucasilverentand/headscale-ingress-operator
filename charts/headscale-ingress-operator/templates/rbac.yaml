@@ -1,0 +1,60 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "headscale-ingress-operator.fullname" . }}-ingresses
+  labels:
+    {{- include "headscale-ingress-operator.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses/status"]
+    verbs: ["update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "headscale-ingress-operator.fullname" . }}-ingresses
+  labels:
+    {{- include "headscale-ingress-operator.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "headscale-ingress-operator.fullname" . }}-ingresses
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "headscale-ingress-operator.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "headscale-ingress-operator.fullname" . }}-records
+  namespace: {{ .Values.headscale.namespace }}
+  labels:
+    {{- include "headscale-ingress-operator.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: [{{ .Values.headscale.recordsConfigMap | quote }}]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "headscale-ingress-operator.fullname" . }}-records
+  namespace: {{ .Values.headscale.namespace }}
+  labels:
+    {{- include "headscale-ingress-operator.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "headscale-ingress-operator.fullname" . }}-records
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "headscale-ingress-operator.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}

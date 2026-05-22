@@ -1,4 +1,4 @@
-module github.com/silverswarm/headscale-ingress-operator
+module github.com/lucasilverentand/headscale-ingress-operator
 
 go 1.26.3
 
