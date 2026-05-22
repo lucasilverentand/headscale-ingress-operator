@@ -30,8 +30,6 @@ spec:
             readOnlyRootFilesystem: true
             runAsNonRoot: true
           args:
-            - --source-class=headscale
-            - --implementation-class=traefik-internal
             - --headscale-namespace=headscale
             - --records-configmap=headscale-extra-records
             - --records-key=extra-records.json

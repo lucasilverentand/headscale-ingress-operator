@@ -8,7 +8,6 @@ import (
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
-	networkingv1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -33,7 +32,6 @@ func TestReconcileThroughFakeKubernetesAPIServer(t *testing.T) {
 		Client: client,
 		Config: Config{
 			AllowedZones:         []string{"cluster.example"},
-			DefaultTargetIPs:     []string{"100.64.0.10"},
 			HeadscaleNamespace:   "headscale",
 			RecordsConfigMapName: "headscale-extra-records",
 			RecordsConfigMapKey:  "extra-records.json",
@@ -44,7 +42,7 @@ func TestReconcileThroughFakeKubernetesAPIServer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if summary.SourceIngresses != 1 || summary.Records != 1 {
+	if summary.SourceServices != 1 || summary.Records != 1 {
 		t.Fatalf("unexpected summary: %+v", summary)
 	}
 
@@ -57,62 +55,61 @@ func TestReconcileThroughFakeKubernetesAPIServer(t *testing.T) {
 	if err := json.Unmarshal([]byte(configMap.Data["extra-records.json"]), &records); err != nil {
 		t.Fatal(err)
 	}
-	if len(records) != 1 || records[0].Name != "whoami.cluster.example" {
+	if len(records) != 1 || records[0].Name != "whoami.cluster.example" || records[0].Value != "100.64.0.10" {
 		t.Fatalf("unexpected records: %#v", records)
 	}
 }
 
 type fakeCluster struct {
 	*httptest.Server
-	ingresses  map[string]*networkingv1.Ingress
+	services   map[string]*corev1.Service
 	configMaps map[string]*corev1.ConfigMap
 }
 
 func newFakeCluster(t *testing.T) *fakeCluster {
 	t.Helper()
 
+	service := sourceService("apps", "whoami", "whoami.cluster.example")
+	service.Annotations[targetIPAnnotation] = "100.64.0.10"
 	cluster := &fakeCluster{
-		ingresses: map[string]*networkingv1.Ingress{
-			"apps/whoami": sourceIngress("apps", "whoami", "whoami.cluster.example", "headscale"),
+		services: map[string]*corev1.Service{
+			"apps/whoami": service,
 		},
 		configMaps: map[string]*corev1.ConfigMap{},
 	}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/apis/networking.k8s.io/v1/ingresses", cluster.handleIngressList)
-	mux.HandleFunc("/apis/networking.k8s.io/v1/namespaces/apps/ingresses", cluster.handleImplementationIngressCreate)
-	mux.HandleFunc("/apis/networking.k8s.io/v1/namespaces/apps/ingresses/whoami-headscale", cluster.handleImplementationIngress)
-	mux.HandleFunc("/apis/networking.k8s.io/v1/namespaces/apps/ingresses/whoami", cluster.handleSourceIngress)
-	mux.HandleFunc("/apis/networking.k8s.io/v1/namespaces/apps/ingresses/whoami/status", cluster.handleSourceIngressStatus)
+	mux.HandleFunc("/api/v1/services", cluster.handleServiceList)
+	mux.HandleFunc("/api/v1/namespaces/apps/services/whoami", cluster.handleService)
 	mux.HandleFunc("/api/v1/namespaces/headscale/configmaps/headscale-extra-records", cluster.handleConfigMap)
 	mux.HandleFunc("/api/v1/namespaces/headscale/configmaps", cluster.handleConfigMapCreate)
 	cluster.Server = httptest.NewServer(mux)
 	return cluster
 }
 
-func (cluster *fakeCluster) handleIngressList(writer http.ResponseWriter, request *http.Request) {
+func (cluster *fakeCluster) handleServiceList(writer http.ResponseWriter, request *http.Request) {
 	if request.Method != http.MethodGet {
 		methodNotAllowed(writer)
 		return
 	}
 
-	list := networkingv1.IngressList{}
-	for _, ingress := range cluster.ingresses {
-		list.Items = append(list.Items, *ingress.DeepCopy())
+	list := corev1.ServiceList{}
+	for _, service := range cluster.services {
+		list.Items = append(list.Items, *service.DeepCopy())
 	}
 	writeJSON(writer, &list)
 }
 
-func (cluster *fakeCluster) handleSourceIngress(writer http.ResponseWriter, request *http.Request) {
-	ingress := cluster.ingresses["apps/whoami"]
-	if ingress == nil {
+func (cluster *fakeCluster) handleService(writer http.ResponseWriter, request *http.Request) {
+	service := cluster.services["apps/whoami"]
+	if service == nil {
 		http.NotFound(writer, request)
 		return
 	}
 
 	switch request.Method {
 	case http.MethodGet:
-		writeJSON(writer, ingress)
+		writeJSON(writer, service)
 	case http.MethodPatch:
 		var patch struct {
 			Metadata struct {
@@ -120,78 +117,18 @@ func (cluster *fakeCluster) handleSourceIngress(writer http.ResponseWriter, requ
 			} `json:"metadata"`
 		}
 		readJSON(request, &patch)
-		updated := ingress.DeepCopy()
+		updated := service.DeepCopy()
 		if updated.Annotations == nil {
 			updated.Annotations = map[string]string{}
 		}
 		for key, value := range patch.Metadata.Annotations {
 			updated.Annotations[key] = value
 		}
-		cluster.ingresses["apps/whoami"] = updated
+		cluster.services["apps/whoami"] = updated
 		writeJSON(writer, updated)
-	case http.MethodPut:
-		var updated networkingv1.Ingress
-		readJSON(request, &updated)
-		cluster.ingresses["apps/whoami"] = &updated
-		writeJSON(writer, &updated)
 	default:
 		methodNotAllowed(writer)
 	}
-}
-
-func (cluster *fakeCluster) handleSourceIngressStatus(writer http.ResponseWriter, request *http.Request) {
-	if request.Method != http.MethodPut && request.Method != http.MethodPatch {
-		methodNotAllowed(writer)
-		return
-	}
-
-	existing := cluster.ingresses["apps/whoami"].DeepCopy()
-	if request.Method == http.MethodPatch {
-		var patch struct {
-			Status networkingv1.IngressStatus `json:"status"`
-		}
-		readJSON(request, &patch)
-		existing.Status = patch.Status
-	} else {
-		var updated networkingv1.Ingress
-		readJSON(request, &updated)
-		existing.Status = updated.Status
-	}
-	cluster.ingresses["apps/whoami"] = existing
-	writeJSON(writer, existing)
-}
-
-func (cluster *fakeCluster) handleImplementationIngress(writer http.ResponseWriter, request *http.Request) {
-	key := "apps/whoami-headscale"
-
-	switch request.Method {
-	case http.MethodGet:
-		ingress := cluster.ingresses[key]
-		if ingress == nil {
-			http.NotFound(writer, request)
-			return
-		}
-		writeJSON(writer, ingress)
-	case http.MethodPut:
-		var updated networkingv1.Ingress
-		readJSON(request, &updated)
-		cluster.ingresses[key] = &updated
-		writeJSON(writer, &updated)
-	default:
-		methodNotAllowed(writer)
-	}
-}
-
-func (cluster *fakeCluster) handleImplementationIngressCreate(writer http.ResponseWriter, request *http.Request) {
-	if request.Method != http.MethodPost {
-		methodNotAllowed(writer)
-		return
-	}
-
-	var created networkingv1.Ingress
-	readJSON(request, &created)
-	cluster.ingresses["apps/"+created.Name] = &created
-	writeJSON(writer, &created)
 }
 
 func (cluster *fakeCluster) handleConfigMap(writer http.ResponseWriter, request *http.Request) {

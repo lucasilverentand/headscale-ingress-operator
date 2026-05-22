@@ -1,27 +1,24 @@
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: {{ include "headscale-ingress-operator.fullname" . }}-ingresses
+  name: {{ include "headscale-ingress-operator.fullname" . }}-services
   labels:
     {{- include "headscale-ingress-operator.labels" . | nindent 4 }}
 rules:
-  - apiGroups: ["networking.k8s.io"]
-    resources: ["ingresses"]
-    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-  - apiGroups: ["networking.k8s.io"]
-    resources: ["ingresses/status"]
-    verbs: ["update", "patch"]
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get", "list", "watch", "patch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: {{ include "headscale-ingress-operator.fullname" . }}-ingresses
+  name: {{ include "headscale-ingress-operator.fullname" . }}-services
   labels:
     {{- include "headscale-ingress-operator.labels" . | nindent 4 }}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: {{ include "headscale-ingress-operator.fullname" . }}-ingresses
+  name: {{ include "headscale-ingress-operator.fullname" . }}-services
 subjects:
   - kind: ServiceAccount
     name: {{ include "headscale-ingress-operator.serviceAccountName" . }}

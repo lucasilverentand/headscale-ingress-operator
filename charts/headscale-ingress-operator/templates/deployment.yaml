@@ -34,14 +34,10 @@ spec:
             {{- toYaml .Values.securityContext | nindent 12 }}
           args:
             - --interval={{ .Values.config.interval }}
-            - --source-class={{ .Values.config.sourceClass }}
-            - --implementation-class={{ .Values.config.implementationClass }}
-            - --implementation-suffix={{ .Values.config.implementationSuffix }}
             - --headscale-namespace={{ .Values.headscale.namespace }}
             - --records-configmap={{ .Values.headscale.recordsConfigMap }}
             - --records-key={{ .Values.headscale.recordsKey }}
             - --allowed-zones={{ join "," .Values.config.allowedZones }}
-            - --default-targets={{ join "," .Values.config.defaultTargets }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
       {{- with .Values.nodeSelector }}

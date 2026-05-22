@@ -1,25 +1,51 @@
-# Headscale Ingress Operator
+# Headscale Service Publisher
 
-Kubernetes operator that exposes ordinary Ingress-backed HTTP(S) services
-through a Headscale tailnet and publishes the matching Headscale MagicDNS
-records.
+Kubernetes operator that publishes annotated Services into Headscale MagicDNS.
+It does not create routing, proxy, TLS, or generated application resources.
 
 The intended user flow is:
 
-1. An app declares an Ingress with `ingressClassName: headscale`.
-2. The operator creates the implementation Ingress or Traefik `IngressRoute`
-   used by the cluster ingress controller.
-3. The operator publishes A/AAAA records into Headscale's managed
-   `dns.extra_records_path` file.
-4. Tailnet clients resolve the app hostname through Headscale and reach the
-   internal ingress endpoint through an advertised route or a managed tailnet
-   gateway.
+1. An app exposes a normal Kubernetes Service.
+2. The Service opts in with
+   `headscale-ingress-operator.lucasilverentand.dev/hostname`.
+3. The operator resolves the Service target IPs and writes A/AAAA records into
+   Headscale's managed `dns.extra_records_path` ConfigMap.
+4. Headscale serves those names through MagicDNS.
+
+Example:
+
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: whoami
+  namespace: apps
+  annotations:
+    headscale-ingress-operator.lucasilverentand.dev/hostname: whoami.cluster.example
+spec:
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080
+  selector:
+    app.kubernetes.io/name: whoami
+```
+
+By default the operator publishes IPs from, in order:
+
+- `.status.loadBalancer.ingress[].ip`
+- `.spec.externalIPs`
+- `.spec.clusterIPs`
+
+For unusual cases, set
+`headscale-ingress-operator.lucasilverentand.dev/target-ip` to a comma-separated
+list of explicit A/AAAA targets.
 
 The design is intentionally private-data-free. Examples use placeholder domains
 and addresses.
 
-See [docs/design.md](docs/design.md) for the proposed architecture, setup
-steps, CRD/API shape, and migration notes for the existing cluster patterns.
+See [docs/design.md](docs/design.md) for the direct Service-to-MagicDNS design
+and setup notes.
 
 ## Current Status
 
@@ -29,14 +55,10 @@ GitHub releases.
 Implemented:
 
 - Go controller loop using `client-go`
-- `Ingress` reconciliation for `ingressClassName: headscale`
-- generated downstream `Ingress` resources using a configurable implementation
-  class
-- public DNS suppression on generated resources
+- Service reconciliation through a hostname annotation
 - Headscale `extra_records_path` JSON written to an operator-owned ConfigMap
-- source Ingress status annotation and load balancer status updates
-- ownership checks that refuse ambiguous generated resources and unmanaged
-  records ConfigMaps
+- service status annotation updates
+- ownership checks that refuse unmanaged records ConfigMaps
 - local fake Kubernetes API tests
 - deployable Kubernetes YAML under `deploy/`
 - Helm chart under `charts/headscale-ingress-operator`

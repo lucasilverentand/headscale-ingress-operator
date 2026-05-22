@@ -9,15 +9,10 @@ import (
 )
 
 type Config struct {
-	SourceClassName                string
-	ImplementationIngressClassName string
-	ImplementationNameSuffix       string
-	HeadscaleNamespace             string
-	RecordsConfigMapName           string
-	RecordsConfigMapKey            string
-	AllowedZones                   []string
-	DefaultTargetIPs               []string
-	StaticRecords                  []DNSRecord
+	HeadscaleNamespace   string
+	RecordsConfigMapName string
+	RecordsConfigMapKey  string
+	AllowedZones         []string
 }
 
 func (config Config) Validate() error {
@@ -26,22 +21,10 @@ func (config Config) Validate() error {
 }
 
 func (config Config) withDefaults() Config {
-	config.SourceClassName = strings.TrimSpace(config.SourceClassName)
-	config.ImplementationIngressClassName = strings.TrimSpace(config.ImplementationIngressClassName)
-	config.ImplementationNameSuffix = strings.TrimSpace(config.ImplementationNameSuffix)
 	config.HeadscaleNamespace = strings.TrimSpace(config.HeadscaleNamespace)
 	config.RecordsConfigMapName = strings.TrimSpace(config.RecordsConfigMapName)
 	config.RecordsConfigMapKey = strings.TrimSpace(config.RecordsConfigMapKey)
 
-	if config.SourceClassName == "" {
-		config.SourceClassName = "headscale"
-	}
-	if config.ImplementationIngressClassName == "" {
-		config.ImplementationIngressClassName = "traefik-internal"
-	}
-	if config.ImplementationNameSuffix == "" {
-		config.ImplementationNameSuffix = "-headscale"
-	}
 	if config.HeadscaleNamespace == "" {
 		config.HeadscaleNamespace = "headscale"
 	}
@@ -56,18 +39,6 @@ func (config Config) withDefaults() Config {
 
 func (config Config) validated() (Config, error) {
 	config = config.withDefaults()
-	if err := validateDNS1123Subdomain("source ingress class", config.SourceClassName); err != nil {
-		return Config{}, err
-	}
-	if err := validateDNS1123Subdomain("implementation ingress class", config.ImplementationIngressClassName); err != nil {
-		return Config{}, err
-	}
-	if config.SourceClassName == config.ImplementationIngressClassName {
-		return Config{}, fmt.Errorf("source and implementation ingress classes must differ")
-	}
-	if err := validateImplementationSuffix(config.ImplementationNameSuffix); err != nil {
-		return Config{}, err
-	}
 	if err := validateDNS1123Label("headscale namespace", config.HeadscaleNamespace); err != nil {
 		return Config{}, err
 	}
@@ -83,24 +54,6 @@ func (config Config) validated() (Config, error) {
 		return Config{}, fmt.Errorf("allowed zones: %w", err)
 	}
 	config.AllowedZones = zones
-	targets, err := normalizeIPs(config.DefaultTargetIPs)
-	if err != nil {
-		return Config{}, fmt.Errorf("default target IPs: %w", err)
-	}
-	config.DefaultTargetIPs = targets
-
-	staticRecords := make([]DNSRecord, 0, len(config.StaticRecords))
-	for _, record := range config.StaticRecords {
-		normalized, ok := normalizeRecord(record)
-		if !ok {
-			return Config{}, fmt.Errorf("invalid static record %q %q %q", record.Name, record.Type, record.Value)
-		}
-		if !hostAllowed(normalized.Name, config.AllowedZones) {
-			return Config{}, fmt.Errorf("static record %q is outside allowed zones", normalized.Name)
-		}
-		staticRecords = append(staticRecords, normalized)
-	}
-	config.StaticRecords = staticRecords
 	return config, nil
 }
 
@@ -114,13 +67,6 @@ func validateDNS1123Subdomain(field string, value string) error {
 func validateDNS1123Label(field string, value string) error {
 	if errs := validation.IsDNS1123Label(value); len(errs) > 0 {
 		return fmt.Errorf("%s %q is invalid: %s", field, value, strings.Join(errs, "; "))
-	}
-	return nil
-}
-
-func validateImplementationSuffix(suffix string) error {
-	if errs := validation.IsDNS1123Subdomain("source" + suffix); len(errs) > 0 {
-		return fmt.Errorf("implementation name suffix %q is invalid: %s", suffix, strings.Join(errs, "; "))
 	}
 	return nil
 }
