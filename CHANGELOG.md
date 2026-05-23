@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.1.0](https://github.com/lucasilverentand/headscale-ingress-operator/compare/v1.0.1...v1.1.0) (2026-05-23)
+
+
+### Features
+
+* manage per-service tailnet proxies ([#25](https://github.com/lucasilverentand/headscale-ingress-operator/issues/25)) ([9b1e1b6](https://github.com/lucasilverentand/headscale-ingress-operator/commit/9b1e1b6d0bfdf7465f3b91fa5274e1cf3722bda7))
+* support Headscale extra records path seed ([#12](https://github.com/lucasilverentand/headscale-ingress-operator/issues/12)) ([18e2fdf](https://github.com/lucasilverentand/headscale-ingress-operator/commit/18e2fdf20490000f491ef7359e7e9c511d3ded22)), closes [#11](https://github.com/lucasilverentand/headscale-ingress-operator/issues/11)
+
 ## [1.0.1](https://github.com/lucasilverentand/headscale-ingress-operator/compare/v1.0.0...v1.0.1) (2026-05-22)
 
 
