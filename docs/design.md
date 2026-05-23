@@ -1,7 +1,8 @@
-# Direct Service MagicDNS Design
+# Service MagicDNS and Tailnet Proxy Design
 
 The operator has one job: publish annotated Kubernetes Services into Headscale
-MagicDNS. It should not own routing, proxying, TLS, or any generated workload.
+MagicDNS. It can optionally own the per-Service tailnet proxy workload that
+backs the published Headscale address.
 
 ## Source Resource
 
@@ -47,8 +48,42 @@ Headscale clients should use, a Service may set:
 headscale-ingress-operator.lucasilverentand.dev/target-ip: 100.64.0.10,fd7a:115c:a1e0::10
 ```
 
-That annotation is still just DNS target selection. It does not create a proxy
-or route.
+In DNS-only mode that annotation is just DNS target selection. In managed proxy
+mode it should point at the app-specific Headscale IP used by the generated
+proxy workload.
+
+## Managed Proxy Mode
+
+Managed proxy mode is opt-in at two levels:
+
+1. The chart must enable proxy management.
+2. The Service must set
+   `headscale-ingress-operator.lucasilverentand.dev/proxy: managed`.
+
+When both are true, the operator creates per-Service resources in the Service
+namespace:
+
+- ServiceAccount
+- Role and RoleBinding for the proxy's Tailscale state Secret
+- nginx ConfigMap
+- Deployment with `tailscale/tailscale` and nginx containers
+
+The proxy joins Headscale with an app-specific node name, runs
+`tailscale serve --tcp 443`, terminates TLS on localhost with nginx, and
+forwards traffic to the Kubernetes Service DNS name.
+
+Per-Service annotations override defaults:
+
+| Annotation | Purpose |
+| --- | --- |
+| `headscale-ingress-operator.lucasilverentand.dev/proxy-tls-secret` | TLS Secret mounted into nginx. |
+| `headscale-ingress-operator.lucasilverentand.dev/proxy-auth-secret` | Secret containing `TS_AUTHKEY`. Defaults to `<service>-tailnet-authkey`. |
+| `headscale-ingress-operator.lucasilverentand.dev/proxy-state-secret` | Secret used by `TS_KUBE_SECRET`. Defaults to `tailscale-<service>`. |
+| `headscale-ingress-operator.lucasilverentand.dev/proxy-tailnet-name` | Headscale/Tailscale node name. Defaults to the Service name. |
+| `headscale-ingress-operator.lucasilverentand.dev/proxy-service-port` | Service port forwarded by nginx. Defaults to the first Service port. |
+
+This keeps the Headscale identity per application. It does not create one shared
+gateway node for all applications.
 
 ## Headscale Write Path
 
@@ -108,8 +143,10 @@ Each loop:
    `headscale-ingress-operator.lucasilverentand.dev/hostname`.
 3. Validate hostnames and reject duplicate claims.
 4. Resolve Service target IPs.
-5. Render deterministic Headscale `extra_records_path` JSON.
-6. Patch each participating Service with a small status annotation.
+5. Reconcile an app-specific proxy workload when the Service opts into managed
+   proxy mode.
+6. Render deterministic Headscale `extra_records_path` JSON.
+7. Patch each participating Service with a small status annotation.
 
 Status values:
 
@@ -121,13 +158,17 @@ Status values:
 
 ## Permissions
 
-The operator needs only:
+The operator needs:
 
 - cluster-wide `get`, `list`, `watch`, and `patch` on Services
 - `get`, `update`, and `patch` on the managed records ConfigMap
 - `create` on ConfigMaps in the Headscale namespace
+- `get`, `list`, `watch`, `create`, `update`, and `patch` on generated
+  ServiceAccounts, ConfigMaps, Deployments, Roles, and RoleBindings when managed
+  proxy mode is enabled
 
-It does not need permission to create application resources.
+Generated proxy resources are owned by the source Service, so normal Kubernetes
+garbage collection removes them when the Service is deleted.
 
 ## Safety Rules
 

@@ -3,6 +3,8 @@ package operator
 import (
 	"context"
 	"encoding/json"
+	"slices"
+	"strings"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -334,6 +336,88 @@ func TestReconcileRejectsDuplicateHosts(t *testing.T) {
 	}
 }
 
+func TestReconcileCreatesManagedProxyResources(t *testing.T) {
+	ctx := context.Background()
+	service := sourceService("apps", "radarr", "radarr.cluster.example")
+	service.UID = "service-uid"
+	service.Annotations[targetIPAnnotation] = "100.64.0.7"
+	service.Annotations[proxyAnnotation] = "managed"
+	client := fake.NewSimpleClientset(
+		namespace("apps"),
+		namespace("headscale"),
+		service,
+	)
+
+	reconciler := Reconciler{
+		Client: client,
+		Config: Config{
+			AllowedZones:         []string{"cluster.example"},
+			HeadscaleNamespace:   "headscale",
+			RecordsConfigMapName: "headscale-extra-records",
+			RecordsConfigMapKey:  "extra-records.json",
+			Proxy: ProxyConfig{
+				Enabled:              true,
+				HeadscaleServerURL:   "https://headscale.example",
+				TailscaleImage:       "tailscale/tailscale:v1.98.3",
+				NginxImage:           "nginx:1.27-alpine",
+				DefaultTLSSecretName: "cluster-tls",
+			},
+		},
+	}
+
+	summary, err := reconciler.Reconcile(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.SourceServices != 1 || summary.Records != 1 || len(summary.Skipped) != 0 {
+		t.Fatalf("unexpected summary: %+v", summary)
+	}
+
+	deployment, err := client.AppsV1().Deployments("apps").Get(ctx, "radarr-tailnet-sidecar", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if deployment.Labels[managedByLabel] != managedByValue {
+		t.Fatalf("deployment managed-by label = %q", deployment.Labels[managedByLabel])
+	}
+	if len(deployment.OwnerReferences) != 1 || deployment.OwnerReferences[0].Name != "radarr" {
+		t.Fatalf("deployment owner references = %#v", deployment.OwnerReferences)
+	}
+	tailscale := deployment.Spec.Template.Spec.Containers[0]
+	if tailscale.Image != "tailscale/tailscale:v1.98.3" {
+		t.Fatalf("tailscale image = %q", tailscale.Image)
+	}
+	if !envContains(tailscale.Env, "TS_HOSTNAME", "radarr") {
+		t.Fatalf("tailscale env does not contain TS_HOSTNAME=radarr: %#v", tailscale.Env)
+	}
+	if !envContains(tailscale.Env, "TS_KUBE_SECRET", "tailscale-radarr") {
+		t.Fatalf("tailscale env does not contain TS_KUBE_SECRET=tailscale-radarr: %#v", tailscale.Env)
+	}
+	if !envContains(tailscale.Env, "TS_EXTRA_ARGS", "--login-server=https://headscale.example") {
+		t.Fatalf("tailscale env does not contain Headscale server URL: %#v", tailscale.Env)
+	}
+
+	configMap, err := client.CoreV1().ConfigMaps("apps").Get(ctx, "radarr-tailnet-sidecar-nginx", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	nginxConfig := configMap.Data["nginx.conf"]
+	if !strings.Contains(nginxConfig, "server_name radarr.cluster.example;") {
+		t.Fatalf("nginx config missing host: %s", nginxConfig)
+	}
+	if !strings.Contains(nginxConfig, "proxy_pass http://radarr.apps.svc.cluster.local:80;") {
+		t.Fatalf("nginx config missing upstream: %s", nginxConfig)
+	}
+
+	role, err := client.RbacV1().Roles("apps").Get(ctx, "radarr-tailnet-sidecar", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(role.Rules[1].ResourceNames, "tailscale-radarr") {
+		t.Fatalf("role does not scope state secret access: %#v", role.Rules)
+	}
+}
+
 func TestReconcileRefusesUnmanagedRecordsConfigMap(t *testing.T) {
 	ctx := context.Background()
 	service := sourceService("apps", "whoami", "whoami.cluster.example")
@@ -384,6 +468,9 @@ func TestReconcileRejectsInvalidConfig(t *testing.T) {
 		"invalid allowed zone": {
 			AllowedZones: []string{"bad_zone.example"},
 		},
+		"proxy enabled without headscale server URL": {
+			Proxy: ProxyConfig{Enabled: true},
+		},
 	}
 
 	for name, config := range tests {
@@ -397,6 +484,15 @@ func TestReconcileRejectsInvalidConfig(t *testing.T) {
 			}
 		})
 	}
+}
+
+func envContains(values []corev1.EnvVar, name string, value string) bool {
+	for _, item := range values {
+		if item.Name == name && item.Value == value {
+			return true
+		}
+	}
+	return false
 }
 
 func sourceService(namespace, name, hosts string) *corev1.Service {

@@ -20,6 +20,7 @@ const (
 	hostnameAnnotation = "headscale-ingress-operator.lucasilverentand.dev/hostname"
 	statusAnnotation   = "headscale-ingress-operator.lucasilverentand.dev/status"
 	targetIPAnnotation = "headscale-ingress-operator.lucasilverentand.dev/target-ip"
+	proxyAnnotation    = "headscale-ingress-operator.lucasilverentand.dev/proxy"
 	managedByLabel     = "app.kubernetes.io/managed-by"
 	statusReady        = "Ready"
 	statusPending      = "PendingTarget"
@@ -108,6 +109,23 @@ func (reconciler Reconciler) Reconcile(ctx context.Context) (Summary, error) {
 			continue
 		}
 
+		if proxyEnabledForService(service) {
+			if _, ok, err := explicitTargetIPsFor(service); !ok || err != nil {
+				summary.Skipped = append(summary.Skipped, sourceID+": managed proxy requires a valid target-ip annotation")
+				if err := reconciler.markService(ctx, service, statusPending); err != nil {
+					return summary, err
+				}
+				continue
+			}
+			if err := reconciler.reconcileProxy(ctx, config, service, hosts); err != nil {
+				summary.Skipped = append(summary.Skipped, sourceID+": "+err.Error())
+				if markErr := reconciler.markService(ctx, service, statusRejected); markErr != nil {
+					return summary, markErr
+				}
+				continue
+			}
+		}
+
 		targets, err := targetIPsForService(service)
 		if err != nil {
 			summary.Skipped = append(summary.Skipped, sourceID+": "+err.Error())
@@ -139,6 +157,11 @@ func (reconciler Reconciler) Reconcile(ctx context.Context) (Summary, error) {
 	}
 	summary.Records = len(records)
 	return summary, nil
+}
+
+func proxyEnabledForService(service corev1.Service) bool {
+	value := strings.TrimSpace(strings.ToLower(service.Annotations[proxyAnnotation]))
+	return value == "true" || value == "managed"
 }
 
 func (reconciler Reconciler) markService(ctx context.Context, service corev1.Service, status string) error {

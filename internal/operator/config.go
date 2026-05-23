@@ -13,6 +13,15 @@ type Config struct {
 	RecordsConfigMapName string
 	RecordsConfigMapKey  string
 	AllowedZones         []string
+	Proxy                ProxyConfig
+}
+
+type ProxyConfig struct {
+	Enabled              bool
+	HeadscaleServerURL   string
+	TailscaleImage       string
+	NginxImage           string
+	DefaultTLSSecretName string
 }
 
 func (config Config) Validate() error {
@@ -24,6 +33,10 @@ func (config Config) withDefaults() Config {
 	config.HeadscaleNamespace = strings.TrimSpace(config.HeadscaleNamespace)
 	config.RecordsConfigMapName = strings.TrimSpace(config.RecordsConfigMapName)
 	config.RecordsConfigMapKey = strings.TrimSpace(config.RecordsConfigMapKey)
+	config.Proxy.HeadscaleServerURL = strings.TrimSpace(config.Proxy.HeadscaleServerURL)
+	config.Proxy.TailscaleImage = strings.TrimSpace(config.Proxy.TailscaleImage)
+	config.Proxy.NginxImage = strings.TrimSpace(config.Proxy.NginxImage)
+	config.Proxy.DefaultTLSSecretName = strings.TrimSpace(config.Proxy.DefaultTLSSecretName)
 
 	if config.HeadscaleNamespace == "" {
 		config.HeadscaleNamespace = "headscale"
@@ -33,6 +46,12 @@ func (config Config) withDefaults() Config {
 	}
 	if config.RecordsConfigMapKey == "" {
 		config.RecordsConfigMapKey = "extra-records.json"
+	}
+	if config.Proxy.TailscaleImage == "" {
+		config.Proxy.TailscaleImage = "tailscale/tailscale:stable"
+	}
+	if config.Proxy.NginxImage == "" {
+		config.Proxy.NginxImage = "nginx:1.27-alpine"
 	}
 	return config
 }
@@ -47,6 +66,16 @@ func (config Config) validated() (Config, error) {
 	}
 	if errs := validation.IsConfigMapKey(config.RecordsConfigMapKey); len(errs) > 0 {
 		return Config{}, fmt.Errorf("records ConfigMap key %q is invalid: %s", config.RecordsConfigMapKey, strings.Join(errs, "; "))
+	}
+	if config.Proxy.Enabled {
+		if config.Proxy.HeadscaleServerURL == "" {
+			return Config{}, fmt.Errorf("proxy Headscale server URL is required when proxy management is enabled")
+		}
+		if config.Proxy.DefaultTLSSecretName != "" {
+			if err := validateDNS1123Subdomain("proxy default TLS Secret name", config.Proxy.DefaultTLSSecretName); err != nil {
+				return Config{}, err
+			}
+		}
 	}
 
 	zones, err := normalizeZones(config.AllowedZones)
