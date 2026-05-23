@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.2.0](https://github.com/lucasilverentand/headscale-ingress-operator/compare/v1.1.1...v1.2.0) (2026-05-23)
+
+
+### Features
+
+* own managed proxy headscale resources ([38faca7](https://github.com/lucasilverentand/headscale-ingress-operator/commit/38faca70d1f7e4bd9c3411d7a29fc4430f63228f))
+
 ## [1.1.1](https://github.com/lucasilverentand/headscale-ingress-operator/compare/v1.1.0...v1.1.1) (2026-05-23)
 
 
