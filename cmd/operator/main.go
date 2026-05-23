@@ -24,6 +24,11 @@ func main() {
 	var recordsConfigMap string
 	var recordsKey string
 	var allowedZones string
+	var proxyEnabled bool
+	var proxyHeadscaleServerURL string
+	var proxyTailscaleImage string
+	var proxyNginxImage string
+	var proxyDefaultTLSSecret string
 
 	flag.StringVar(&kubeconfig, "kubeconfig", os.Getenv("KUBECONFIG"), "Path to kubeconfig. Defaults to in-cluster config when empty.")
 	flag.DurationVar(&interval, "interval", 30*time.Second, "Reconcile interval.")
@@ -31,6 +36,11 @@ func main() {
 	flag.StringVar(&recordsConfigMap, "records-configmap", "headscale-extra-records", "Name of the Headscale records ConfigMap.")
 	flag.StringVar(&recordsKey, "records-key", "extra-records.json", "ConfigMap key containing Headscale extra_records_path JSON.")
 	flag.StringVar(&allowedZones, "allowed-zones", "", "Comma-separated DNS zones this operator may publish. Empty allows all hosts.")
+	flag.BoolVar(&proxyEnabled, "proxy-enabled", false, "Create managed tailnet proxy workloads for Services with the proxy annotation.")
+	flag.StringVar(&proxyHeadscaleServerURL, "proxy-headscale-server-url", "", "Headscale server URL passed to managed proxy Tailscale containers.")
+	flag.StringVar(&proxyTailscaleImage, "proxy-tailscale-image", "", "Tailscale image for managed proxy workloads.")
+	flag.StringVar(&proxyNginxImage, "proxy-nginx-image", "", "nginx image for managed proxy workloads.")
+	flag.StringVar(&proxyDefaultTLSSecret, "proxy-default-tls-secret", "", "Default TLS Secret mounted by managed proxy workloads.")
 	flag.Parse()
 
 	if interval <= 0 {
@@ -43,6 +53,13 @@ func main() {
 		RecordsConfigMapName: recordsConfigMap,
 		RecordsConfigMapKey:  recordsKey,
 		AllowedZones:         splitCSV(allowedZones),
+		Proxy: operator.ProxyConfig{
+			Enabled:              proxyEnabled,
+			HeadscaleServerURL:   proxyHeadscaleServerURL,
+			TailscaleImage:       proxyTailscaleImage,
+			NginxImage:           proxyNginxImage,
+			DefaultTLSSecretName: proxyDefaultTLSSecret,
+		},
 	}
 	if err := operatorConfig.Validate(); err != nil {
 		slog.Error("invalid configuration", "error", err)

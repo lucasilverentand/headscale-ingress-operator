@@ -38,6 +38,11 @@ spec:
             - --records-configmap={{ .Values.headscale.recordsConfigMap }}
             - --records-key={{ .Values.headscale.recordsKey }}
             - --allowed-zones={{ join "," .Values.config.allowedZones }}
+            - --proxy-enabled={{ .Values.proxy.enabled }}
+            - --proxy-headscale-server-url={{ .Values.headscale.serverURL }}
+            - --proxy-tailscale-image={{ .Values.proxy.tailscaleImage }}
+            - --proxy-nginx-image={{ .Values.proxy.nginxImage }}
+            - --proxy-default-tls-secret={{ .Values.proxy.defaultTLSSecret }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
       {{- with .Values.nodeSelector }}

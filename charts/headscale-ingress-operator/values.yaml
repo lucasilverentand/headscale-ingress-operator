@@ -47,9 +47,16 @@ config:
     - cluster.example
 
 headscale:
+  serverURL: ""
   namespace: headscale
   recordsConfigMap: headscale-extra-records
   recordsKey: extra-records.json
   seedConfigMap:
     create: false
     keepOnUninstall: true
+
+proxy:
+  enabled: false
+  tailscaleImage: tailscale/tailscale:stable
+  nginxImage: nginx:1.27-alpine
+  defaultTLSSecret: ""
