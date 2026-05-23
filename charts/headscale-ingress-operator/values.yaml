@@ -50,3 +50,6 @@ headscale:
   namespace: headscale
   recordsConfigMap: headscale-extra-records
   recordsKey: extra-records.json
+  seedConfigMap:
+    create: false
+    keepOnUninstall: true

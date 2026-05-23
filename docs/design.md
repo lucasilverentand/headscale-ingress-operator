@@ -66,6 +66,39 @@ path. The operator refuses to update an existing ConfigMap unless it has
 `app.kubernetes.io/managed-by=headscale-ingress-operator`, which keeps it from
 overwriting hand-maintained DNS state.
 
+The Helm chart can optionally seed that ConfigMap with an empty records array so
+the file exists before Headscale starts:
+
+```yaml
+headscale:
+  seedConfigMap:
+    create: true
+```
+
+That seed is only the bootstrap handoff. After startup, the operator owns the
+records key and writes the full desired DNS set on every reconciliation.
+
+Example Headscale mount:
+
+```yaml
+volumeMounts:
+  - name: extra-records
+    mountPath: /etc/headscale/extra-records/extra-records.json
+    subPath: extra-records.json
+    readOnly: true
+volumes:
+  - name: extra-records
+    configMap:
+      name: headscale-extra-records
+      items:
+        - key: extra-records.json
+          path: extra-records.json
+```
+
+GitOps tools should not keep reconciling the records data back to `[]`. Create
+the seed once, ignore the records key after bootstrap, or let the Helm chart
+seed it while preserving the live value on upgrades.
+
 ## Reconciliation
 
 Each loop:

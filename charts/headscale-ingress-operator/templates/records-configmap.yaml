@@ -1,0 +1,30 @@
+{{- if .Values.headscale.seedConfigMap.create -}}
+{{- $namespace := .Values.headscale.namespace | default "headscale" -}}
+{{- $name := .Values.headscale.recordsConfigMap | default "headscale-extra-records" -}}
+{{- $key := .Values.headscale.recordsKey | default "extra-records.json" -}}
+{{- $records := "[]\n" -}}
+{{- with (lookup "v1" "ConfigMap" $namespace $name) -}}
+{{- with .data -}}
+{{- if hasKey . $key -}}
+{{- $records = index . $key -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $name }}
+  namespace: {{ $namespace }}
+  labels:
+    app.kubernetes.io/name: {{ include "headscale-ingress-operator.name" . }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: headscale-records
+    app.kubernetes.io/managed-by: headscale-ingress-operator
+  {{- if .Values.headscale.seedConfigMap.keepOnUninstall }}
+  annotations:
+    helm.sh/resource-policy: keep
+  {{- end }}
+data:
+  {{ $key }}: |
+{{ $records | indent 4 }}
+{{- end }}
