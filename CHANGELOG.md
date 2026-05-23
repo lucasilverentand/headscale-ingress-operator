@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.1](https://github.com/lucasilverentand/headscale-ingress-operator/compare/v1.1.0...v1.1.1) (2026-05-23)
+
+
+### Bug Fixes
+
+* allow proxy role delegation ([e245c7d](https://github.com/lucasilverentand/headscale-ingress-operator/commit/e245c7d17b9fd511f30bb2ded30dc3592879dab1))
+
 ## [1.1.0](https://github.com/lucasilverentand/headscale-ingress-operator/compare/v1.0.1...v1.1.0) (2026-05-23)
 
 
