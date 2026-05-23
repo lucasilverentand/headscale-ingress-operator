@@ -22,6 +22,11 @@ type ProxyConfig struct {
 	TailscaleImage       string
 	NginxImage           string
 	DefaultTLSSecretName string
+	HeadscalePodSelector string
+	HeadscaleContainer   string
+	HeadscaleUser        string
+	AuthKeyExpiration    string
+	AuthKeyTags          []string
 }
 
 func (config Config) Validate() error {
@@ -37,6 +42,10 @@ func (config Config) withDefaults() Config {
 	config.Proxy.TailscaleImage = strings.TrimSpace(config.Proxy.TailscaleImage)
 	config.Proxy.NginxImage = strings.TrimSpace(config.Proxy.NginxImage)
 	config.Proxy.DefaultTLSSecretName = strings.TrimSpace(config.Proxy.DefaultTLSSecretName)
+	config.Proxy.HeadscalePodSelector = strings.TrimSpace(config.Proxy.HeadscalePodSelector)
+	config.Proxy.HeadscaleContainer = strings.TrimSpace(config.Proxy.HeadscaleContainer)
+	config.Proxy.HeadscaleUser = strings.TrimSpace(config.Proxy.HeadscaleUser)
+	config.Proxy.AuthKeyExpiration = strings.TrimSpace(config.Proxy.AuthKeyExpiration)
 
 	if config.HeadscaleNamespace == "" {
 		config.HeadscaleNamespace = "headscale"
@@ -52,6 +61,21 @@ func (config Config) withDefaults() Config {
 	}
 	if config.Proxy.NginxImage == "" {
 		config.Proxy.NginxImage = "nginx:1.27-alpine"
+	}
+	if config.Proxy.HeadscalePodSelector == "" {
+		config.Proxy.HeadscalePodSelector = "app.kubernetes.io/name=headscale"
+	}
+	if config.Proxy.HeadscaleContainer == "" {
+		config.Proxy.HeadscaleContainer = "headscale"
+	}
+	if config.Proxy.HeadscaleUser == "" {
+		config.Proxy.HeadscaleUser = "k8s-apps"
+	}
+	if config.Proxy.AuthKeyExpiration == "" {
+		config.Proxy.AuthKeyExpiration = "90d"
+	}
+	if len(config.Proxy.AuthKeyTags) == 0 {
+		config.Proxy.AuthKeyTags = []string{"tag:cluster"}
 	}
 	return config
 }

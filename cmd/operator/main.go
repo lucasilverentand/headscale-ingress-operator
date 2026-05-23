@@ -29,6 +29,11 @@ func main() {
 	var proxyTailscaleImage string
 	var proxyNginxImage string
 	var proxyDefaultTLSSecret string
+	var proxyHeadscalePodSelector string
+	var proxyHeadscaleContainer string
+	var proxyHeadscaleUser string
+	var proxyAuthKeyExpiration string
+	var proxyAuthKeyTags string
 
 	flag.StringVar(&kubeconfig, "kubeconfig", os.Getenv("KUBECONFIG"), "Path to kubeconfig. Defaults to in-cluster config when empty.")
 	flag.DurationVar(&interval, "interval", 30*time.Second, "Reconcile interval.")
@@ -41,6 +46,11 @@ func main() {
 	flag.StringVar(&proxyTailscaleImage, "proxy-tailscale-image", "", "Tailscale image for managed proxy workloads.")
 	flag.StringVar(&proxyNginxImage, "proxy-nginx-image", "", "nginx image for managed proxy workloads.")
 	flag.StringVar(&proxyDefaultTLSSecret, "proxy-default-tls-secret", "", "Default TLS Secret mounted by managed proxy workloads.")
+	flag.StringVar(&proxyHeadscalePodSelector, "proxy-headscale-pod-selector", "", "Label selector used to find the Headscale pod for managed proxy auth and node lookup.")
+	flag.StringVar(&proxyHeadscaleContainer, "proxy-headscale-container", "", "Headscale container name used for managed proxy auth and node lookup.")
+	flag.StringVar(&proxyHeadscaleUser, "proxy-headscale-user", "", "Headscale user used for managed proxy preauth keys.")
+	flag.StringVar(&proxyAuthKeyExpiration, "proxy-authkey-expiration", "", "Expiration for managed proxy Headscale preauth keys.")
+	flag.StringVar(&proxyAuthKeyTags, "proxy-authkey-tags", "", "Comma-separated Headscale tags assigned to managed proxy preauth keys.")
 	flag.Parse()
 
 	if interval <= 0 {
@@ -59,6 +69,11 @@ func main() {
 			TailscaleImage:       proxyTailscaleImage,
 			NginxImage:           proxyNginxImage,
 			DefaultTLSSecretName: proxyDefaultTLSSecret,
+			HeadscalePodSelector: proxyHeadscalePodSelector,
+			HeadscaleContainer:   proxyHeadscaleContainer,
+			HeadscaleUser:        proxyHeadscaleUser,
+			AuthKeyExpiration:    proxyAuthKeyExpiration,
+			AuthKeyTags:          splitCSV(proxyAuthKeyTags),
 		},
 	}
 	if err := operatorConfig.Validate(); err != nil {
@@ -66,15 +81,17 @@ func main() {
 		os.Exit(1)
 	}
 
-	client, err := kubernetes.NewForConfig(kubernetesConfig(kubeconfig))
+	restConfig := kubernetesConfig(kubeconfig)
+	client, err := kubernetes.NewForConfig(restConfig)
 	if err != nil {
 		slog.Error("create Kubernetes client", "error", err)
 		os.Exit(1)
 	}
 
 	reconciler := operator.Reconciler{
-		Client: client,
-		Config: operatorConfig,
+		Client:    client,
+		Config:    operatorConfig,
+		Headscale: operator.NewKubernetesHeadscaleClient(client, restConfig, operatorConfig),
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)

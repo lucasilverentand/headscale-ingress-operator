@@ -24,12 +24,15 @@ const (
 	managedByLabel     = "app.kubernetes.io/managed-by"
 	statusReady        = "Ready"
 	statusPending      = "PendingTarget"
+	statusPendingAuth  = "PendingAuthKey"
+	statusPendingNode  = "PendingNodeIP"
 	statusRejected     = "Rejected"
 )
 
 type Reconciler struct {
-	Client kubernetes.Interface
-	Config Config
+	Client    kubernetes.Interface
+	Config    Config
+	Headscale HeadscaleClient
 }
 
 type Summary struct {
@@ -61,6 +64,8 @@ func (reconciler Reconciler) Reconcile(ctx context.Context) (Summary, error) {
 	records := []DNSRecord{}
 	readyMarks := []serviceMark{}
 	hostOwners := map[string]map[string]struct{}{}
+
+	activeProxies := map[string]struct{}{}
 
 	for i := range list.Items {
 		service := list.Items[i]
@@ -109,31 +114,59 @@ func (reconciler Reconciler) Reconcile(ctx context.Context) (Summary, error) {
 			continue
 		}
 
+		var targets []string
 		if proxyEnabledForService(service) {
-			if _, ok, err := explicitTargetIPsFor(service); !ok || err != nil {
-				summary.Skipped = append(summary.Skipped, sourceID+": managed proxy requires a valid target-ip annotation")
-				if err := reconciler.markService(ctx, service, statusPending); err != nil {
+			activeProxies[service.Namespace+"/"+service.Name] = struct{}{}
+			spec, err := desiredProxySpec(config, service, hosts)
+			if err != nil {
+				summary.Skipped = append(summary.Skipped, sourceID+": "+err.Error())
+				if err := reconciler.markService(ctx, service, statusRejected); err != nil {
 					return summary, err
 				}
 				continue
 			}
-			if err := reconciler.reconcileProxy(ctx, config, service, hosts); err != nil {
+			if err := reconciler.ensureProxyAuthSecret(ctx, service, spec); err != nil {
+				summary.Skipped = append(summary.Skipped, sourceID+": "+err.Error())
+				if err := reconciler.markService(ctx, service, statusPendingAuth); err != nil {
+					return summary, err
+				}
+				continue
+			}
+			if err := reconciler.reconcileProxy(ctx, config, service, spec); err != nil {
 				summary.Skipped = append(summary.Skipped, sourceID+": "+err.Error())
 				if markErr := reconciler.markService(ctx, service, statusRejected); markErr != nil {
 					return summary, markErr
 				}
 				continue
 			}
+
+			targets, err = reconciler.proxyTargetIPs(ctx, service, spec)
+			if err != nil {
+				summary.Skipped = append(summary.Skipped, sourceID+": "+err.Error())
+				if err := reconciler.markService(ctx, service, statusRejected); err != nil {
+					return summary, err
+				}
+				continue
+			}
+			if len(targets) == 0 {
+				summary.Skipped = append(summary.Skipped, sourceID+": no Headscale node IPs resolved for "+spec.tailnetName)
+				if err := reconciler.markService(ctx, service, statusPendingNode); err != nil {
+					return summary, err
+				}
+				continue
+			}
+		} else {
+			var err error
+			targets, err = targetIPsForService(service)
+			if err != nil {
+				summary.Skipped = append(summary.Skipped, sourceID+": "+err.Error())
+				if err := reconciler.markService(ctx, service, statusRejected); err != nil {
+					return summary, err
+				}
+				continue
+			}
 		}
 
-		targets, err := targetIPsForService(service)
-		if err != nil {
-			summary.Skipped = append(summary.Skipped, sourceID+": "+err.Error())
-			if err := reconciler.markService(ctx, service, statusRejected); err != nil {
-				return summary, err
-			}
-			continue
-		}
 		if len(targets) == 0 {
 			summary.Skipped = append(summary.Skipped, sourceID+": no A/AAAA target resolved")
 			if err := reconciler.markService(ctx, service, statusPending); err != nil {
@@ -155,6 +188,9 @@ func (reconciler Reconciler) Reconcile(ctx context.Context) (Summary, error) {
 			return summary, err
 		}
 	}
+	if err := reconciler.cleanupInactiveProxies(ctx, activeProxies); err != nil {
+		return summary, err
+	}
 	summary.Records = len(records)
 	return summary, nil
 }
@@ -162,6 +198,16 @@ func (reconciler Reconciler) Reconcile(ctx context.Context) (Summary, error) {
 func proxyEnabledForService(service corev1.Service) bool {
 	value := strings.TrimSpace(strings.ToLower(service.Annotations[proxyAnnotation]))
 	return value == "true" || value == "managed"
+}
+
+func (reconciler Reconciler) proxyTargetIPs(ctx context.Context, service corev1.Service, spec proxySpec) ([]string, error) {
+	if targets, ok, err := explicitTargetIPsFor(service); ok || err != nil {
+		return targets, err
+	}
+	if reconciler.Headscale == nil {
+		return nil, fmt.Errorf("managed proxy without target-ip requires a Headscale client")
+	}
+	return reconciler.Headscale.NodeIPs(ctx, spec.tailnetName)
 }
 
 func (reconciler Reconciler) markService(ctx context.Context, service corev1.Service, status string) error {

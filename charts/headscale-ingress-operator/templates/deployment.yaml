@@ -40,6 +40,11 @@ spec:
             - --allowed-zones={{ join "," .Values.config.allowedZones }}
             - --proxy-enabled={{ .Values.proxy.enabled }}
             - --proxy-headscale-server-url={{ .Values.headscale.serverURL }}
+            - --proxy-headscale-pod-selector={{ .Values.headscale.podSelector }}
+            - --proxy-headscale-container={{ .Values.headscale.container }}
+            - --proxy-headscale-user={{ .Values.proxy.headscaleUser }}
+            - --proxy-authkey-expiration={{ .Values.proxy.authKeyExpiration }}
+            - --proxy-authkey-tags={{ join "," .Values.proxy.authKeyTags }}
             - --proxy-tailscale-image={{ .Values.proxy.tailscaleImage }}
             - --proxy-nginx-image={{ .Values.proxy.nginxImage }}
             - --proxy-default-tls-secret={{ .Values.proxy.defaultTLSSecret }}
