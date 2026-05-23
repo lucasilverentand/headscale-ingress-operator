@@ -49,6 +49,8 @@ config:
 headscale:
   serverURL: ""
   namespace: headscale
+  podSelector: app.kubernetes.io/name=headscale
+  container: headscale
   recordsConfigMap: headscale-extra-records
   recordsKey: extra-records.json
   seedConfigMap:
@@ -57,6 +59,10 @@ headscale:
 
 proxy:
   enabled: false
+  headscaleUser: k8s-apps
+  authKeyExpiration: 90d
+  authKeyTags:
+    - tag:cluster
   tailscaleImage: tailscale/tailscale:stable
   nginxImage: nginx:1.27-alpine
   defaultTLSSecret: ""

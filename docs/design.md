@@ -49,8 +49,8 @@ headscale-ingress-operator.lucasilverentand.dev/target-ip: 100.64.0.10,fd7a:115c
 ```
 
 In DNS-only mode that annotation is just DNS target selection. In managed proxy
-mode it should point at the app-specific Headscale IP used by the generated
-proxy workload.
+mode it is optional: when omitted, the operator discovers the app-specific
+Headscale node by tailnet name and publishes the node's assigned IPs.
 
 ## Managed Proxy Mode
 
@@ -65,12 +65,15 @@ namespace:
 
 - ServiceAccount
 - Role and RoleBinding for the proxy's Tailscale state Secret
+- Secret containing a Headscale preauth key for the proxy
 - nginx ConfigMap
 - Deployment with `tailscale/tailscale` and nginx containers
 
 The proxy joins Headscale with an app-specific node name, runs
 `tailscale serve --tcp 443`, terminates TLS on localhost with nginx, and
-forwards traffic to the Kubernetes Service DNS name.
+forwards traffic to the Kubernetes Service DNS name. The operator mints the
+preauth key by executing the Headscale CLI in the configured Headscale pod,
+then writes the key into the Service namespace.
 
 Per-Service annotations override defaults:
 
@@ -143,10 +146,12 @@ Each loop:
    `headscale-ingress-operator.lucasilverentand.dev/hostname`.
 3. Validate hostnames and reject duplicate claims.
 4. Resolve Service target IPs.
-5. Reconcile an app-specific proxy workload when the Service opts into managed
-   proxy mode.
-6. Render deterministic Headscale `extra_records_path` JSON.
-7. Patch each participating Service with a small status annotation.
+5. Mint an app auth key and reconcile an app-specific proxy workload when the
+   Service opts into managed proxy mode.
+6. Discover the app Headscale node IPs unless explicit target IPs are set.
+7. Render deterministic Headscale `extra_records_path` JSON.
+8. Patch each participating Service with a small status annotation.
+9. Delete generated proxy resources for Services that no longer opt in.
 
 Status values:
 
@@ -154,6 +159,8 @@ Status values:
 | --- | --- |
 | `Ready` | The Service has valid hostnames and at least one published A/AAAA target. |
 | `PendingTarget` | The Service opted in but has no usable A/AAAA target yet. |
+| `PendingAuthKey` | Managed proxy mode is waiting for a Headscale preauth key. |
+| `PendingNodeIP` | Managed proxy mode is waiting for the app node to appear in Headscale. |
 | `Rejected` | The Service has invalid hostnames, conflicting hostnames, or invalid target IPs. |
 
 ## Permissions
@@ -166,6 +173,9 @@ The operator needs:
 - `get`, `list`, `watch`, `create`, `update`, and `patch` on generated
   ServiceAccounts, ConfigMaps, Deployments, Roles, and RoleBindings when managed
   proxy mode is enabled
+- `get` and `list` on Headscale pods plus `create` on `pods/exec` in the
+  Headscale namespace when managed proxy mode mints auth keys or discovers node
+  IPs
 
 Generated proxy resources are owned by the source Service, so normal Kubernetes
 garbage collection removes them when the Service is deleted.

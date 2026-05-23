@@ -49,12 +49,12 @@ func TestReconcilePublishesServiceMagicDNSRecords(t *testing.T) {
 		t.Fatalf("service status annotation = %q", updatedService.Annotations[statusAnnotation])
 	}
 
-	configMap, err := client.CoreV1().ConfigMaps("headscale").Get(ctx, "headscale-extra-records", metav1.GetOptions{})
+	recordsConfigMap, err := client.CoreV1().ConfigMaps("headscale").Get(ctx, "headscale-extra-records", metav1.GetOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	var records []DNSRecord
-	if err := json.Unmarshal([]byte(configMap.Data["extra-records.json"]), &records); err != nil {
+	if err := json.Unmarshal([]byte(recordsConfigMap.Data["extra-records.json"]), &records); err != nil {
 		t.Fatal(err)
 	}
 
@@ -95,12 +95,12 @@ func TestReconcileUsesServiceAddresses(t *testing.T) {
 		t.Fatalf("unexpected summary: %+v", summary)
 	}
 
-	configMap, err := client.CoreV1().ConfigMaps("headscale").Get(ctx, "headscale-extra-records", metav1.GetOptions{})
+	recordsConfigMap, err := client.CoreV1().ConfigMaps("headscale").Get(ctx, "headscale-extra-records", metav1.GetOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	var records []DNSRecord
-	if err := json.Unmarshal([]byte(configMap.Data["extra-records.json"]), &records); err != nil {
+	if err := json.Unmarshal([]byte(recordsConfigMap.Data["extra-records.json"]), &records); err != nil {
 		t.Fatal(err)
 	}
 
@@ -340,7 +340,6 @@ func TestReconcileCreatesManagedProxyResources(t *testing.T) {
 	ctx := context.Background()
 	service := sourceService("apps", "radarr", "radarr.cluster.example")
 	service.UID = "service-uid"
-	service.Annotations[targetIPAnnotation] = "100.64.0.7"
 	service.Annotations[proxyAnnotation] = "managed"
 	client := fake.NewSimpleClientset(
 		namespace("apps"),
@@ -350,6 +349,10 @@ func TestReconcileCreatesManagedProxyResources(t *testing.T) {
 
 	reconciler := Reconciler{
 		Client: client,
+		Headscale: fakeHeadscale{
+			authKey: "tskey-auth",
+			nodes:   map[string][]string{"radarr": {"100.64.0.7"}},
+		},
 		Config: Config{
 			AllowedZones:         []string{"cluster.example"},
 			HeadscaleNamespace:   "headscale",
@@ -371,6 +374,13 @@ func TestReconcileCreatesManagedProxyResources(t *testing.T) {
 	}
 	if summary.SourceServices != 1 || summary.Records != 1 || len(summary.Skipped) != 0 {
 		t.Fatalf("unexpected summary: %+v", summary)
+	}
+	secret, err := client.CoreV1().Secrets("apps").Get(ctx, "radarr-tailnet-authkey", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(secret.Data["TS_AUTHKEY"]) != "tskey-auth" {
+		t.Fatalf("auth secret key = %q", secret.Data["TS_AUTHKEY"])
 	}
 
 	deployment, err := client.AppsV1().Deployments("apps").Get(ctx, "radarr-tailnet-sidecar", metav1.GetOptions{})
@@ -415,6 +425,116 @@ func TestReconcileCreatesManagedProxyResources(t *testing.T) {
 	}
 	if !slices.Contains(role.Rules[1].ResourceNames, "tailscale-radarr") {
 		t.Fatalf("role does not scope state secret access: %#v", role.Rules)
+	}
+
+	recordsConfigMap, err := client.CoreV1().ConfigMaps("headscale").Get(ctx, "headscale-extra-records", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var records []DNSRecord
+	if err := json.Unmarshal([]byte(recordsConfigMap.Data["extra-records.json"]), &records); err != nil {
+		t.Fatal(err)
+	}
+	want := []DNSRecord{{Name: "radarr.cluster.example", Type: "A", Value: "100.64.0.7"}}
+	if !recordsEqual(records, want) {
+		t.Fatalf("records = %#v, want %#v", records, want)
+	}
+}
+
+func TestReconcileMarksManagedProxyPendingUntilNodeIPExists(t *testing.T) {
+	ctx := context.Background()
+	service := sourceService("apps", "radarr", "radarr.cluster.example")
+	service.UID = "service-uid"
+	service.Annotations[proxyAnnotation] = "managed"
+	client := fake.NewSimpleClientset(
+		namespace("apps"),
+		namespace("headscale"),
+		service,
+	)
+
+	reconciler := Reconciler{
+		Client: client,
+		Headscale: fakeHeadscale{
+			authKey: "tskey-auth",
+			nodes:   map[string][]string{},
+		},
+		Config: Config{
+			AllowedZones:         []string{"cluster.example"},
+			HeadscaleNamespace:   "headscale",
+			RecordsConfigMapName: "headscale-extra-records",
+			RecordsConfigMapKey:  "extra-records.json",
+			Proxy: ProxyConfig{
+				Enabled:              true,
+				HeadscaleServerURL:   "https://headscale.example",
+				DefaultTLSSecretName: "cluster-tls",
+			},
+		},
+	}
+
+	summary, err := reconciler.Reconcile(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.Records != 0 || len(summary.Skipped) != 1 {
+		t.Fatalf("unexpected summary: %+v", summary)
+	}
+	updated, err := client.CoreV1().Services("apps").Get(ctx, "radarr", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Annotations[statusAnnotation] != statusPendingNode {
+		t.Fatalf("service status annotation = %q", updated.Annotations[statusAnnotation])
+	}
+	if _, err := client.AppsV1().Deployments("apps").Get(ctx, "radarr-tailnet-sidecar", metav1.GetOptions{}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestReconcileCleansUpProxyWhenAnnotationIsRemoved(t *testing.T) {
+	ctx := context.Background()
+	service := sourceService("apps", "radarr", "radarr.cluster.example")
+	service.UID = "service-uid"
+	client := fake.NewSimpleClientset(
+		namespace("apps"),
+		namespace("headscale"),
+		service,
+		desiredProxyDeployment(Config{Proxy: ProxyConfig{TailscaleImage: "tailscale", NginxImage: "nginx"}}, proxySpec{name: "radarr-tailnet-sidecar", authSecretName: "radarr-tailnet-authkey", stateSecret: "tailscale-radarr", tailnetName: "radarr", tlsSecretName: "cluster-tls", servicePort: 80}, metav1.OwnerReference{Name: "radarr"}),
+		desiredProxyConfigMap(*service, proxySpec{name: "radarr-tailnet-sidecar", tlsSecretName: "cluster-tls", servicePort: 80}, metav1.OwnerReference{Name: "radarr"}),
+		desiredProxyServiceAccount(proxySpec{name: "radarr-tailnet-sidecar"}, metav1.OwnerReference{Name: "radarr"}),
+		desiredProxyRole(proxySpec{name: "radarr-tailnet-sidecar", stateSecret: "tailscale-radarr"}, metav1.OwnerReference{Name: "radarr"}),
+		desiredProxyRoleBinding(proxySpec{name: "radarr-tailnet-sidecar"}, metav1.OwnerReference{Name: "radarr"}),
+		&corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "radarr-tailnet-authkey",
+				Namespace: "apps",
+				Labels:    proxyLabelsForService(*service),
+			},
+			Data: map[string][]byte{"TS_AUTHKEY": []byte("old-key")},
+		},
+	)
+
+	reconciler := Reconciler{
+		Client: client,
+		Config: Config{
+			AllowedZones:         []string{"cluster.example"},
+			HeadscaleNamespace:   "headscale",
+			RecordsConfigMapName: "headscale-extra-records",
+			RecordsConfigMapKey:  "extra-records.json",
+			Proxy: ProxyConfig{
+				Enabled:            true,
+				HeadscaleServerURL: "https://headscale.example",
+			},
+		},
+	}
+
+	if _, err := reconciler.Reconcile(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.AppsV1().Deployments("apps").Get(ctx, "radarr-tailnet-sidecar", metav1.GetOptions{}); err == nil {
+		t.Fatal("expected stale proxy deployment to be deleted")
+	}
+	if _, err := client.CoreV1().Secrets("apps").Get(ctx, "radarr-tailnet-authkey", metav1.GetOptions{}); err == nil {
+		t.Fatal("expected stale proxy auth secret to be deleted")
 	}
 }
 
@@ -528,4 +648,17 @@ func recordsEqual(left, right []DNSRecord) bool {
 		}
 	}
 	return true
+}
+
+type fakeHeadscale struct {
+	authKey string
+	nodes   map[string][]string
+}
+
+func (fake fakeHeadscale) MintReusableAuthKey(context.Context) (string, error) {
+	return fake.authKey, nil
+}
+
+func (fake fakeHeadscale) NodeIPs(_ context.Context, nodeName string) ([]string, error) {
+	return fake.nodes[nodeName], nil
 }

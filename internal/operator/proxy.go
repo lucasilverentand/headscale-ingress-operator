@@ -38,14 +38,9 @@ type proxySpec struct {
 	hosts          []string
 }
 
-func (reconciler Reconciler) reconcileProxy(ctx context.Context, config Config, service corev1.Service, hosts []string) error {
+func (reconciler Reconciler) reconcileProxy(ctx context.Context, config Config, service corev1.Service, spec proxySpec) error {
 	if !config.Proxy.Enabled {
 		return nil
-	}
-
-	spec, err := desiredProxySpec(config, service, hosts)
-	if err != nil {
-		return err
 	}
 
 	owner := metav1.OwnerReference{
@@ -70,6 +65,58 @@ func (reconciler Reconciler) reconcileProxy(ctx context.Context, config Config, 
 		return err
 	}
 	return nil
+}
+
+func (reconciler Reconciler) ensureProxyAuthSecret(ctx context.Context, service corev1.Service, spec proxySpec) error {
+	owner := metav1.OwnerReference{
+		APIVersion: "v1",
+		Kind:       "Service",
+		Name:       service.Name,
+		UID:        service.UID,
+	}
+	client := reconciler.Client.CoreV1().Secrets(service.Namespace)
+	existing, err := client.Get(ctx, spec.authSecretName, metav1.GetOptions{})
+	missing := apierrors.IsNotFound(err)
+	if err != nil && !missing {
+		return wrapProxyError("get proxy auth secret", service.Namespace, spec.authSecretName, err)
+	}
+	if err == nil && len(existing.Data["TS_AUTHKEY"]) > 0 {
+		copy := existing.DeepCopy()
+		copy.Labels = proxyLabelsForService(service)
+		copy.OwnerReferences = []metav1.OwnerReference{owner}
+		if copy.Type == "" {
+			copy.Type = corev1.SecretTypeOpaque
+		}
+		_, err = client.Update(ctx, copy, metav1.UpdateOptions{})
+		return wrapProxyError("adopt proxy auth secret", service.Namespace, spec.authSecretName, err)
+	}
+	if reconciler.Headscale == nil {
+		return fmt.Errorf("managed proxy requires a Headscale client to mint %s", spec.authSecretName)
+	}
+	key, err := reconciler.Headscale.MintReusableAuthKey(ctx)
+	if err != nil {
+		return fmt.Errorf("mint proxy auth key: %w", err)
+	}
+	desired := &corev1.Secret{
+		ObjectMeta: withOwner(metav1.ObjectMeta{
+			Name:   spec.authSecretName,
+			Labels: proxyLabelsForService(service),
+		}, owner),
+		Type: corev1.SecretTypeOpaque,
+		Data: map[string][]byte{"TS_AUTHKEY": []byte(key)},
+	}
+	if missing {
+		desired.Namespace = service.Namespace
+		_, err = client.Create(ctx, desired, metav1.CreateOptions{})
+		return wrapProxyError("create proxy auth secret", service.Namespace, spec.authSecretName, err)
+	}
+	copy := existing.DeepCopy()
+	copy.Labels = desired.Labels
+	copy.OwnerReferences = desired.OwnerReferences
+	copy.Type = desired.Type
+	copy.Data = desired.Data
+	_, err = client.Update(ctx, copy, metav1.UpdateOptions{})
+	return wrapProxyError("update proxy auth secret", service.Namespace, spec.authSecretName, err)
 }
 
 func desiredProxySpec(config Config, service corev1.Service, hosts []string) (proxySpec, error) {
@@ -464,6 +511,90 @@ func (reconciler Reconciler) upsertDeployment(ctx context.Context, namespace str
 	copy.Spec = desired.Spec
 	_, err = client.Update(ctx, copy, metav1.UpdateOptions{})
 	return wrapProxyError("update proxy deployment", namespace, desired.Name, err)
+}
+
+func (reconciler Reconciler) cleanupInactiveProxies(ctx context.Context, active map[string]struct{}) error {
+	selector := proxyComponentLabel + "=" + proxyComponentValue
+	deployments, err := reconciler.Client.AppsV1().Deployments("").List(ctx, metav1.ListOptions{LabelSelector: selector})
+	if apierrors.IsNotFound(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("list managed proxy deployments: %w", err)
+	}
+	for _, deployment := range deployments.Items {
+		sourceName := deployment.Labels[proxySourceNameLabel]
+		if sourceName == "" {
+			continue
+		}
+		if _, ok := active[deployment.Namespace+"/"+sourceName]; ok {
+			continue
+		}
+		if err := reconciler.deleteProxyResourceSet(ctx, deployment.Namespace, deployment.Name); err != nil {
+			return err
+		}
+	}
+
+	secrets, err := reconciler.Client.CoreV1().Secrets("").List(ctx, metav1.ListOptions{LabelSelector: selector})
+	if apierrors.IsNotFound(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("list managed proxy auth secrets: %w", err)
+	}
+	for _, secret := range secrets.Items {
+		sourceName := secret.Labels[proxySourceNameLabel]
+		if sourceName == "" {
+			continue
+		}
+		if _, ok := active[secret.Namespace+"/"+sourceName]; ok {
+			continue
+		}
+		if err := reconciler.deleteIfManagedSecret(ctx, secret.Namespace, secret.Name); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (reconciler Reconciler) deleteProxyResourceSet(ctx context.Context, namespace string, name string) error {
+	if err := ignoreNotFound(reconciler.Client.AppsV1().Deployments(namespace).Delete(ctx, name, metav1.DeleteOptions{})); err != nil {
+		return wrapProxyError("delete proxy deployment", namespace, name, err)
+	}
+	if err := ignoreNotFound(reconciler.Client.CoreV1().ConfigMaps(namespace).Delete(ctx, name+"-nginx", metav1.DeleteOptions{})); err != nil {
+		return wrapProxyError("delete proxy configmap", namespace, name+"-nginx", err)
+	}
+	if err := ignoreNotFound(reconciler.Client.RbacV1().RoleBindings(namespace).Delete(ctx, name, metav1.DeleteOptions{})); err != nil {
+		return wrapProxyError("delete proxy role binding", namespace, name, err)
+	}
+	if err := ignoreNotFound(reconciler.Client.RbacV1().Roles(namespace).Delete(ctx, name, metav1.DeleteOptions{})); err != nil {
+		return wrapProxyError("delete proxy role", namespace, name, err)
+	}
+	if err := ignoreNotFound(reconciler.Client.CoreV1().ServiceAccounts(namespace).Delete(ctx, name, metav1.DeleteOptions{})); err != nil {
+		return wrapProxyError("delete proxy service account", namespace, name, err)
+	}
+	return nil
+}
+
+func (reconciler Reconciler) deleteIfManagedSecret(ctx context.Context, namespace string, name string) error {
+	secret, err := reconciler.Client.CoreV1().Secrets(namespace).Get(ctx, name, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return nil
+	}
+	if err != nil {
+		return wrapProxyError("get proxy auth secret", namespace, name, err)
+	}
+	if secret.Labels[managedByLabel] != managedByValue || secret.Labels[proxyComponentLabel] != proxyComponentValue {
+		return nil
+	}
+	return wrapProxyError("delete proxy auth secret", namespace, name, ignoreNotFound(reconciler.Client.CoreV1().Secrets(namespace).Delete(ctx, name, metav1.DeleteOptions{})))
+}
+
+func ignoreNotFound(err error) error {
+	if apierrors.IsNotFound(err) {
+		return nil
+	}
+	return err
 }
 
 func wrapProxyError(action string, namespace string, name string, err error) error {
