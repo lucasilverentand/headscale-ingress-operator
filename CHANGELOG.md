@@ -1,5 +1,16 @@
 # Changelog
 
+## [2.0.0](https://github.com/lucasilverentand/headscale-ingress-operator/compare/v1.2.0...v2.0.0) (2026-05-24)
+
+
+### ⚠ BREAKING CHANGES
+
+* Services annotated with headscale-ingress-operator.lucasilverentand.dev/hostname are no longer reconciled. Declare a networking.k8s.io/v1 Ingress with ingressClassName: headscale instead.
+
+### Features
+
+* require headscale ingress resources ([1c032f3](https://github.com/lucasilverentand/headscale-ingress-operator/commit/1c032f30bb2d8759b450adc1a266fe66dd4c8403))
+
 ## [1.2.0](https://github.com/lucasilverentand/headscale-ingress-operator/compare/v1.1.1...v1.2.0) (2026-05-23)
 
 
