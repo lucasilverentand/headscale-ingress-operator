@@ -1,0 +1,10 @@
+{{- if .Values.ingressClass.create }}
+apiVersion: networking.k8s.io/v1
+kind: IngressClass
+metadata:
+  name: {{ .Values.config.ingressClassName }}
+  labels:
+    {{- include "headscale-ingress-operator.labels" . | nindent 4 }}
+spec:
+  controller: {{ .Values.ingressClass.controller }}
+{{- end }}

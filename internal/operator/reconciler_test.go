@@ -8,343 +8,22 @@ import (
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/kubernetes/fake"
 )
 
-func TestReconcilePublishesServiceMagicDNSRecords(t *testing.T) {
+func TestReconcileCreatesManagedProxyResourcesForIngress(t *testing.T) {
 	ctx := context.Background()
-	service := sourceService("apps", "whoami", "whoami.cluster.example")
-	service.Annotations[targetIPAnnotation] = "100.64.0.10"
+	service := plainService("apps", "radarr", 7878)
+	ingress := sourceIngress("apps", "radarr", "radarr.cluster.example", "radarr", networkingv1.ServiceBackendPort{Number: 7878})
+	ingress.UID = "ingress-uid"
 	client := fake.NewSimpleClientset(
 		namespace("apps"),
 		namespace("headscale"),
 		service,
-	)
-
-	reconciler := Reconciler{
-		Client: client,
-		Config: Config{
-			AllowedZones:         []string{"cluster.example"},
-			HeadscaleNamespace:   "headscale",
-			RecordsConfigMapName: "headscale-extra-records",
-			RecordsConfigMapKey:  "extra-records.json",
-		},
-	}
-
-	summary, err := reconciler.Reconcile(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if summary.SourceServices != 1 || summary.Records != 1 || len(summary.Skipped) != 0 {
-		t.Fatalf("unexpected summary: %+v", summary)
-	}
-
-	updatedService, err := client.CoreV1().Services("apps").Get(ctx, "whoami", metav1.GetOptions{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if updatedService.Annotations[statusAnnotation] != statusReady {
-		t.Fatalf("service status annotation = %q", updatedService.Annotations[statusAnnotation])
-	}
-
-	recordsConfigMap, err := client.CoreV1().ConfigMaps("headscale").Get(ctx, "headscale-extra-records", metav1.GetOptions{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	var records []DNSRecord
-	if err := json.Unmarshal([]byte(recordsConfigMap.Data["extra-records.json"]), &records); err != nil {
-		t.Fatal(err)
-	}
-
-	want := []DNSRecord{{Name: "whoami.cluster.example", Type: "A", Value: "100.64.0.10"}}
-	if !recordsEqual(records, want) {
-		t.Fatalf("records = %#v, want %#v", records, want)
-	}
-}
-
-func TestReconcileUsesServiceAddresses(t *testing.T) {
-	ctx := context.Background()
-	service := sourceService("apps", "api", "api.cluster.example, api-alt.cluster.example")
-	service.Spec.ExternalIPs = []string{"100.64.0.10"}
-	service.Spec.ClusterIPs = []string{"10.96.0.25"}
-	service.Spec.ClusterIP = "10.96.0.25"
-	service.Status.LoadBalancer.Ingress = []corev1.LoadBalancerIngress{{IP: "100.64.0.11"}}
-	client := fake.NewSimpleClientset(
-		namespace("apps"),
-		namespace("headscale"),
-		service,
-	)
-
-	reconciler := Reconciler{
-		Client: client,
-		Config: Config{
-			AllowedZones:         []string{"cluster.example"},
-			HeadscaleNamespace:   "headscale",
-			RecordsConfigMapName: "headscale-extra-records",
-			RecordsConfigMapKey:  "extra-records.json",
-		},
-	}
-
-	summary, err := reconciler.Reconcile(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if summary.SourceServices != 1 || summary.Records != 6 || len(summary.Skipped) != 0 {
-		t.Fatalf("unexpected summary: %+v", summary)
-	}
-
-	recordsConfigMap, err := client.CoreV1().ConfigMaps("headscale").Get(ctx, "headscale-extra-records", metav1.GetOptions{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	var records []DNSRecord
-	if err := json.Unmarshal([]byte(recordsConfigMap.Data["extra-records.json"]), &records); err != nil {
-		t.Fatal(err)
-	}
-
-	want := []DNSRecord{
-		{Name: "api-alt.cluster.example", Type: "A", Value: "10.96.0.25"},
-		{Name: "api-alt.cluster.example", Type: "A", Value: "100.64.0.10"},
-		{Name: "api-alt.cluster.example", Type: "A", Value: "100.64.0.11"},
-		{Name: "api.cluster.example", Type: "A", Value: "10.96.0.25"},
-		{Name: "api.cluster.example", Type: "A", Value: "100.64.0.10"},
-		{Name: "api.cluster.example", Type: "A", Value: "100.64.0.11"},
-	}
-	if !recordsEqual(records, want) {
-		t.Fatalf("records = %#v, want %#v", records, want)
-	}
-}
-
-func TestReconcileRejectsHostsOutsideAllowedZones(t *testing.T) {
-	ctx := context.Background()
-	service := sourceService("apps", "bad", "bad.other.example")
-	service.Annotations[targetIPAnnotation] = "100.64.0.10"
-	client := fake.NewSimpleClientset(
-		namespace("apps"),
-		namespace("headscale"),
-		service,
-	)
-
-	reconciler := Reconciler{
-		Client: client,
-		Config: Config{
-			AllowedZones:         []string{"cluster.example"},
-			HeadscaleNamespace:   "headscale",
-			RecordsConfigMapName: "headscale-extra-records",
-			RecordsConfigMapKey:  "extra-records.json",
-		},
-	}
-
-	summary, err := reconciler.Reconcile(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(summary.Skipped) != 1 || summary.SourceServices != 1 || summary.Records != 0 {
-		t.Fatalf("unexpected summary: %+v", summary)
-	}
-
-	configMap, err := client.CoreV1().ConfigMaps("headscale").Get(ctx, "headscale-extra-records", metav1.GetOptions{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if configMap.Data["extra-records.json"] != "[]\n" {
-		t.Fatalf("records = %q", configMap.Data["extra-records.json"])
-	}
-
-	updated, err := client.CoreV1().Services("apps").Get(ctx, "bad", metav1.GetOptions{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if updated.Annotations[statusAnnotation] != statusRejected {
-		t.Fatalf("service status annotation = %q", updated.Annotations[statusAnnotation])
-	}
-}
-
-func TestReconcileRejectsInvalidDNSHosts(t *testing.T) {
-	ctx := context.Background()
-	service := sourceService("apps", "bad", "bad_name.cluster.example")
-	service.Annotations[targetIPAnnotation] = "100.64.0.10"
-	client := fake.NewSimpleClientset(
-		namespace("apps"),
-		namespace("headscale"),
-		service,
-	)
-
-	reconciler := Reconciler{
-		Client: client,
-		Config: Config{
-			AllowedZones:         []string{"cluster.example"},
-			HeadscaleNamespace:   "headscale",
-			RecordsConfigMapName: "headscale-extra-records",
-			RecordsConfigMapKey:  "extra-records.json",
-		},
-	}
-
-	summary, err := reconciler.Reconcile(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(summary.Skipped) != 1 || summary.Records != 0 {
-		t.Fatalf("unexpected summary: %+v", summary)
-	}
-}
-
-func TestReconcileRejectsInvalidTargetAnnotation(t *testing.T) {
-	ctx := context.Background()
-	service := sourceService("apps", "bad-target", "bad-target.cluster.example")
-	service.Annotations[targetIPAnnotation] = "not-an-ip"
-	client := fake.NewSimpleClientset(
-		namespace("apps"),
-		namespace("headscale"),
-		service,
-	)
-
-	reconciler := Reconciler{
-		Client: client,
-		Config: Config{
-			AllowedZones:         []string{"cluster.example"},
-			HeadscaleNamespace:   "headscale",
-			RecordsConfigMapName: "headscale-extra-records",
-			RecordsConfigMapKey:  "extra-records.json",
-		},
-	}
-
-	summary, err := reconciler.Reconcile(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(summary.Skipped) != 1 || summary.Records != 0 {
-		t.Fatalf("unexpected summary: %+v", summary)
-	}
-
-	updated, err := client.CoreV1().Services("apps").Get(ctx, "bad-target", metav1.GetOptions{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if updated.Annotations[statusAnnotation] != statusRejected {
-		t.Fatalf("service status annotation = %q", updated.Annotations[statusAnnotation])
-	}
-}
-
-func TestReconcileMarksServicePendingWhenNoAddressIsAvailable(t *testing.T) {
-	ctx := context.Background()
-	service := sourceService("apps", "headless", "headless.cluster.example")
-	service.Spec.ClusterIP = corev1.ClusterIPNone
-	service.Spec.ClusterIPs = []string{corev1.ClusterIPNone}
-	client := fake.NewSimpleClientset(
-		namespace("apps"),
-		namespace("headscale"),
-		service,
-	)
-
-	reconciler := Reconciler{
-		Client: client,
-		Config: Config{
-			AllowedZones:         []string{"cluster.example"},
-			HeadscaleNamespace:   "headscale",
-			RecordsConfigMapName: "headscale-extra-records",
-			RecordsConfigMapKey:  "extra-records.json",
-		},
-	}
-
-	summary, err := reconciler.Reconcile(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(summary.Skipped) != 1 || summary.Records != 0 {
-		t.Fatalf("unexpected summary: %+v", summary)
-	}
-
-	updated, err := client.CoreV1().Services("apps").Get(ctx, "headless", metav1.GetOptions{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if updated.Annotations[statusAnnotation] != statusPending {
-		t.Fatalf("service status annotation = %q", updated.Annotations[statusAnnotation])
-	}
-}
-
-func TestReconcileSkipsServicesWithoutHostnames(t *testing.T) {
-	ctx := context.Background()
-	ignored := sourceService("apps", "ignored", "")
-	ignored.Annotations = map[string]string{}
-	client := fake.NewSimpleClientset(
-		namespace("apps"),
-		namespace("headscale"),
-		ignored,
-	)
-
-	reconciler := Reconciler{
-		Client: client,
-		Config: Config{
-			HeadscaleNamespace:   "headscale",
-			RecordsConfigMapName: "headscale-extra-records",
-			RecordsConfigMapKey:  "extra-records.json",
-		},
-	}
-
-	summary, err := reconciler.Reconcile(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if summary.SourceServices != 0 || summary.Records != 0 || len(summary.Skipped) != 0 {
-		t.Fatalf("unexpected summary: %+v", summary)
-	}
-}
-
-func TestReconcileRejectsDuplicateHosts(t *testing.T) {
-	ctx := context.Background()
-	appA := sourceService("apps", "app-a", "shared.cluster.example")
-	appA.Annotations[targetIPAnnotation] = "100.64.0.10"
-	appB := sourceService("apps", "app-b", "shared.cluster.example")
-	appB.Annotations[targetIPAnnotation] = "100.64.0.11"
-	client := fake.NewSimpleClientset(
-		namespace("apps"),
-		namespace("headscale"),
-		appA,
-		appB,
-	)
-
-	reconciler := Reconciler{
-		Client: client,
-		Config: Config{
-			AllowedZones:         []string{"cluster.example"},
-			HeadscaleNamespace:   "headscale",
-			RecordsConfigMapName: "headscale-extra-records",
-			RecordsConfigMapKey:  "extra-records.json",
-		},
-	}
-
-	summary, err := reconciler.Reconcile(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(summary.Skipped) != 2 || summary.Records != 0 {
-		t.Fatalf("unexpected summary: %+v", summary)
-	}
-
-	for _, name := range []string{"app-a", "app-b"} {
-		updated, err := client.CoreV1().Services("apps").Get(ctx, name, metav1.GetOptions{})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if updated.Annotations[statusAnnotation] != statusRejected {
-			t.Fatalf("%s status annotation = %q", name, updated.Annotations[statusAnnotation])
-		}
-	}
-}
-
-func TestReconcileCreatesManagedProxyResources(t *testing.T) {
-	ctx := context.Background()
-	service := sourceService("apps", "radarr", "radarr.cluster.example")
-	service.UID = "service-uid"
-	service.Annotations[proxyAnnotation] = "managed"
-	client := fake.NewSimpleClientset(
-		namespace("apps"),
-		namespace("headscale"),
-		service,
+		ingress,
 	)
 
 	reconciler := Reconciler{
@@ -353,28 +32,17 @@ func TestReconcileCreatesManagedProxyResources(t *testing.T) {
 			authKey: "tskey-auth",
 			nodes:   map[string][]string{"radarr": {"100.64.0.7"}},
 		},
-		Config: Config{
-			AllowedZones:         []string{"cluster.example"},
-			HeadscaleNamespace:   "headscale",
-			RecordsConfigMapName: "headscale-extra-records",
-			RecordsConfigMapKey:  "extra-records.json",
-			Proxy: ProxyConfig{
-				Enabled:              true,
-				HeadscaleServerURL:   "https://headscale.example",
-				TailscaleImage:       "tailscale/tailscale:v1.98.3",
-				NginxImage:           "nginx:1.27-alpine",
-				DefaultTLSSecretName: "cluster-tls",
-			},
-		},
+		Config: testConfig(),
 	}
 
 	summary, err := reconciler.Reconcile(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if summary.SourceServices != 1 || summary.Records != 1 || len(summary.Skipped) != 0 {
+	if summary.SourceIngresses != 1 || summary.Records != 1 || len(summary.Skipped) != 0 {
 		t.Fatalf("unexpected summary: %+v", summary)
 	}
+
 	secret, err := client.CoreV1().Secrets("apps").Get(ctx, "radarr-tailnet-authkey", metav1.GetOptions{})
 	if err != nil {
 		t.Fatal(err)
@@ -390,7 +58,10 @@ func TestReconcileCreatesManagedProxyResources(t *testing.T) {
 	if deployment.Labels[managedByLabel] != managedByValue {
 		t.Fatalf("deployment managed-by label = %q", deployment.Labels[managedByLabel])
 	}
-	if len(deployment.OwnerReferences) != 1 || deployment.OwnerReferences[0].Name != "radarr" {
+	if deployment.Labels[proxySourceKindLabel] != "Ingress" {
+		t.Fatalf("deployment source kind label = %q", deployment.Labels[proxySourceKindLabel])
+	}
+	if len(deployment.OwnerReferences) != 1 || deployment.OwnerReferences[0].Kind != "Ingress" || deployment.OwnerReferences[0].Name != "radarr" {
 		t.Fatalf("deployment owner references = %#v", deployment.OwnerReferences)
 	}
 	tailscale := deployment.Spec.Template.Spec.Containers[0]
@@ -415,7 +86,7 @@ func TestReconcileCreatesManagedProxyResources(t *testing.T) {
 	if !strings.Contains(nginxConfig, "server_name radarr.cluster.example;") {
 		t.Fatalf("nginx config missing host: %s", nginxConfig)
 	}
-	if !strings.Contains(nginxConfig, "proxy_pass http://radarr.apps.svc.cluster.local:80;") {
+	if !strings.Contains(nginxConfig, "proxy_pass http://radarr.apps.svc.cluster.local:7878;") {
 		t.Fatalf("nginx config missing upstream: %s", nginxConfig)
 	}
 
@@ -427,48 +98,141 @@ func TestReconcileCreatesManagedProxyResources(t *testing.T) {
 		t.Fatalf("role does not scope state secret access: %#v", role.Rules)
 	}
 
-	recordsConfigMap, err := client.CoreV1().ConfigMaps("headscale").Get(ctx, "headscale-extra-records", metav1.GetOptions{})
+	updatedIngress, err := client.NetworkingV1().Ingresses("apps").Get(ctx, "radarr", metav1.GetOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	var records []DNSRecord
-	if err := json.Unmarshal([]byte(recordsConfigMap.Data["extra-records.json"]), &records); err != nil {
-		t.Fatal(err)
+	if updatedIngress.Annotations[statusAnnotation] != statusReady {
+		t.Fatalf("ingress status annotation = %q", updatedIngress.Annotations[statusAnnotation])
 	}
+	if len(updatedIngress.Status.LoadBalancer.Ingress) != 1 || updatedIngress.Status.LoadBalancer.Ingress[0].IP != "100.64.0.7" {
+		t.Fatalf("ingress load balancer status = %#v", updatedIngress.Status.LoadBalancer.Ingress)
+	}
+
+	records := recordsFromConfigMap(t, client, ctx)
 	want := []DNSRecord{{Name: "radarr.cluster.example", Type: "A", Value: "100.64.0.7"}}
 	if !recordsEqual(records, want) {
 		t.Fatalf("records = %#v, want %#v", records, want)
 	}
 }
 
-func TestReconcileMarksManagedProxyPendingUntilNodeIPExists(t *testing.T) {
+func TestReconcileResolvesNamedIngressBackendServicePort(t *testing.T) {
 	ctx := context.Background()
-	service := sourceService("apps", "radarr", "radarr.cluster.example")
-	service.UID = "service-uid"
-	service.Annotations[proxyAnnotation] = "managed"
+	service := plainService("apps", "radarr", 7878)
+	ingress := sourceIngress("apps", "radarr", "radarr.cluster.example", "radarr", networkingv1.ServiceBackendPort{Name: "http"})
+	client := fake.NewSimpleClientset(namespace("apps"), namespace("headscale"), service, ingress)
+
+	reconciler := Reconciler{
+		Client:    client,
+		Headscale: fakeHeadscale{authKey: "tskey-auth", nodes: map[string][]string{"radarr": {"100.64.0.7"}}},
+		Config:    testConfig(),
+	}
+
+	if _, err := reconciler.Reconcile(ctx); err != nil {
+		t.Fatal(err)
+	}
+	configMap, err := client.CoreV1().ConfigMaps("apps").Get(ctx, "radarr-tailnet-sidecar-nginx", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(configMap.Data["nginx.conf"], "proxy_pass http://radarr.apps.svc.cluster.local:7878;") {
+		t.Fatalf("nginx config missing named backend port: %s", configMap.Data["nginx.conf"])
+	}
+}
+
+func TestReconcileRejectsHostsOutsideAllowedZones(t *testing.T) {
+	ctx := context.Background()
+	service := plainService("apps", "bad", 80)
+	ingress := sourceIngress("apps", "bad", "bad.other.example", "bad", networkingv1.ServiceBackendPort{Number: 80})
+	client := fake.NewSimpleClientset(namespace("apps"), namespace("headscale"), service, ingress)
+
+	reconciler := Reconciler{
+		Client:    client,
+		Headscale: fakeHeadscale{authKey: "tskey-auth", nodes: map[string][]string{"bad": {"100.64.0.10"}}},
+		Config:    testConfig(),
+	}
+
+	summary, err := reconciler.Reconcile(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(summary.Skipped) != 1 || summary.SourceIngresses != 1 || summary.Records != 0 {
+		t.Fatalf("unexpected summary: %+v", summary)
+	}
+	updated, err := client.NetworkingV1().Ingresses("apps").Get(ctx, "bad", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Annotations[statusAnnotation] != statusRejected {
+		t.Fatalf("ingress status annotation = %q", updated.Annotations[statusAnnotation])
+	}
+}
+
+func TestReconcileRejectsDuplicateIngressHosts(t *testing.T) {
+	ctx := context.Background()
+	appA := sourceIngress("apps", "app-a", "shared.cluster.example", "app-a", networkingv1.ServiceBackendPort{Number: 80})
+	appB := sourceIngress("apps", "app-b", "shared.cluster.example", "app-b", networkingv1.ServiceBackendPort{Number: 80})
 	client := fake.NewSimpleClientset(
 		namespace("apps"),
 		namespace("headscale"),
-		service,
+		plainService("apps", "app-a", 80),
+		plainService("apps", "app-b", 80),
+		appA,
+		appB,
 	)
 
 	reconciler := Reconciler{
+		Client:    client,
+		Headscale: fakeHeadscale{authKey: "tskey-auth", nodes: map[string][]string{"app-a": {"100.64.0.10"}, "app-b": {"100.64.0.11"}}},
+		Config:    testConfig(),
+	}
+
+	summary, err := reconciler.Reconcile(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(summary.Skipped) != 2 || summary.Records != 0 {
+		t.Fatalf("unexpected summary: %+v", summary)
+	}
+}
+
+func TestReconcileIgnoresIngressForOtherClass(t *testing.T) {
+	ctx := context.Background()
+	service := plainService("apps", "radarr", 7878)
+	ingress := sourceIngress("apps", "radarr", "radarr.cluster.example", "radarr", networkingv1.ServiceBackendPort{Number: 7878})
+	otherClass := "traefik"
+	ingress.Spec.IngressClassName = &otherClass
+	client := fake.NewSimpleClientset(namespace("apps"), namespace("headscale"), service, ingress)
+
+	reconciler := Reconciler{
 		Client: client,
-		Headscale: fakeHeadscale{
-			authKey: "tskey-auth",
-			nodes:   map[string][]string{},
-		},
 		Config: Config{
-			AllowedZones:         []string{"cluster.example"},
 			HeadscaleNamespace:   "headscale",
 			RecordsConfigMapName: "headscale-extra-records",
 			RecordsConfigMapKey:  "extra-records.json",
-			Proxy: ProxyConfig{
-				Enabled:              true,
-				HeadscaleServerURL:   "https://headscale.example",
-				DefaultTLSSecretName: "cluster-tls",
-			},
+			IngressClassName:     "headscale",
 		},
+	}
+
+	summary, err := reconciler.Reconcile(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.SourceIngresses != 0 || summary.Records != 0 || len(summary.Skipped) != 0 {
+		t.Fatalf("unexpected summary: %+v", summary)
+	}
+}
+
+func TestReconcileMarksIngressPendingUntilNodeIPExists(t *testing.T) {
+	ctx := context.Background()
+	service := plainService("apps", "radarr", 7878)
+	ingress := sourceIngress("apps", "radarr", "radarr.cluster.example", "radarr", networkingv1.ServiceBackendPort{Number: 7878})
+	client := fake.NewSimpleClientset(namespace("apps"), namespace("headscale"), service, ingress)
+
+	reconciler := Reconciler{
+		Client:    client,
+		Headscale: fakeHeadscale{authKey: "tskey-auth", nodes: map[string][]string{}},
+		Config:    testConfig(),
 	}
 
 	summary, err := reconciler.Reconcile(ctx)
@@ -478,36 +242,33 @@ func TestReconcileMarksManagedProxyPendingUntilNodeIPExists(t *testing.T) {
 	if summary.Records != 0 || len(summary.Skipped) != 1 {
 		t.Fatalf("unexpected summary: %+v", summary)
 	}
-	updated, err := client.CoreV1().Services("apps").Get(ctx, "radarr", metav1.GetOptions{})
+	updated, err := client.NetworkingV1().Ingresses("apps").Get(ctx, "radarr", metav1.GetOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if updated.Annotations[statusAnnotation] != statusPendingNode {
-		t.Fatalf("service status annotation = %q", updated.Annotations[statusAnnotation])
+		t.Fatalf("ingress status annotation = %q", updated.Annotations[statusAnnotation])
 	}
 	if _, err := client.AppsV1().Deployments("apps").Get(ctx, "radarr-tailnet-sidecar", metav1.GetOptions{}); err != nil {
 		t.Fatal(err)
 	}
 }
 
-func TestReconcileCleansUpProxyWhenAnnotationIsRemoved(t *testing.T) {
+func TestReconcileCleansUpProxyWhenIngressIsRemoved(t *testing.T) {
 	ctx := context.Background()
-	service := sourceService("apps", "radarr", "radarr.cluster.example")
-	service.UID = "service-uid"
 	client := fake.NewSimpleClientset(
 		namespace("apps"),
 		namespace("headscale"),
-		service,
-		desiredProxyDeployment(Config{Proxy: ProxyConfig{TailscaleImage: "tailscale", NginxImage: "nginx"}}, proxySpec{name: "radarr-tailnet-sidecar", authSecretName: "radarr-tailnet-authkey", stateSecret: "tailscale-radarr", tailnetName: "radarr", tlsSecretName: "cluster-tls", servicePort: 80}, metav1.OwnerReference{Name: "radarr"}),
-		desiredProxyConfigMap(*service, proxySpec{name: "radarr-tailnet-sidecar", tlsSecretName: "cluster-tls", servicePort: 80}, metav1.OwnerReference{Name: "radarr"}),
-		desiredProxyServiceAccount(proxySpec{name: "radarr-tailnet-sidecar"}, metav1.OwnerReference{Name: "radarr"}),
-		desiredProxyRole(proxySpec{name: "radarr-tailnet-sidecar", stateSecret: "tailscale-radarr"}, metav1.OwnerReference{Name: "radarr"}),
-		desiredProxyRoleBinding(proxySpec{name: "radarr-tailnet-sidecar"}, metav1.OwnerReference{Name: "radarr"}),
+		desiredProxyDeployment(Config{Proxy: ProxyConfig{TailscaleImage: "tailscale", NginxImage: "nginx"}}, testProxySpec("radarr"), metav1.OwnerReference{Kind: "Ingress", Name: "radarr"}),
+		desiredProxyConfigMap(testProxySpec("radarr"), metav1.OwnerReference{Kind: "Ingress", Name: "radarr"}),
+		desiredProxyServiceAccount(testProxySpec("radarr"), metav1.OwnerReference{Kind: "Ingress", Name: "radarr"}),
+		desiredProxyRole(testProxySpec("radarr"), metav1.OwnerReference{Kind: "Ingress", Name: "radarr"}),
+		desiredProxyRoleBinding(testProxySpec("radarr"), metav1.OwnerReference{Kind: "Ingress", Name: "radarr"}),
 		&corev1.Secret{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "radarr-tailnet-authkey",
 				Namespace: "apps",
-				Labels:    proxyLabelsForService(*service),
+				Labels:    proxyLabelsForSpec(testProxySpec("radarr")),
 			},
 			Data: map[string][]byte{"TS_AUTHKEY": []byte("old-key")},
 		},
@@ -515,16 +276,7 @@ func TestReconcileCleansUpProxyWhenAnnotationIsRemoved(t *testing.T) {
 
 	reconciler := Reconciler{
 		Client: client,
-		Config: Config{
-			AllowedZones:         []string{"cluster.example"},
-			HeadscaleNamespace:   "headscale",
-			RecordsConfigMapName: "headscale-extra-records",
-			RecordsConfigMapKey:  "extra-records.json",
-			Proxy: ProxyConfig{
-				Enabled:            true,
-				HeadscaleServerURL: "https://headscale.example",
-			},
-		},
+		Config: testConfig(),
 	}
 
 	if _, err := reconciler.Reconcile(ctx); err != nil {
@@ -540,12 +292,13 @@ func TestReconcileCleansUpProxyWhenAnnotationIsRemoved(t *testing.T) {
 
 func TestReconcileRefusesUnmanagedRecordsConfigMap(t *testing.T) {
 	ctx := context.Background()
-	service := sourceService("apps", "whoami", "whoami.cluster.example")
-	service.Annotations[targetIPAnnotation] = "100.64.0.10"
+	service := plainService("apps", "whoami", 80)
+	ingress := sourceIngress("apps", "whoami", "whoami.cluster.example", "whoami", networkingv1.ServiceBackendPort{Number: 80})
 	client := fake.NewSimpleClientset(
 		namespace("apps"),
 		namespace("headscale"),
 		service,
+		ingress,
 		&corev1.ConfigMap{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "headscale-extra-records",
@@ -556,24 +309,20 @@ func TestReconcileRefusesUnmanagedRecordsConfigMap(t *testing.T) {
 	)
 
 	reconciler := Reconciler{
-		Client: client,
-		Config: Config{
-			HeadscaleNamespace:   "headscale",
-			RecordsConfigMapName: "headscale-extra-records",
-			RecordsConfigMapKey:  "extra-records.json",
-		},
+		Client:    client,
+		Headscale: fakeHeadscale{authKey: "tskey-auth", nodes: map[string][]string{"whoami": {"100.64.0.10"}}},
+		Config:    testConfig(),
 	}
 
 	if _, err := reconciler.Reconcile(ctx); err == nil {
 		t.Fatal("expected unmanaged records ConfigMap to be rejected")
 	}
-
-	updated, err := client.CoreV1().Services("apps").Get(ctx, "whoami", metav1.GetOptions{})
+	updated, err := client.NetworkingV1().Ingresses("apps").Get(ctx, "whoami", metav1.GetOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got := updated.Annotations[statusAnnotation]; got == statusReady {
-		t.Fatalf("service was marked ready before records were published: %q", got)
+		t.Fatalf("ingress was marked ready before records were published: %q", got)
 	}
 }
 
@@ -606,6 +355,19 @@ func TestReconcileRejectsInvalidConfig(t *testing.T) {
 	}
 }
 
+func recordsFromConfigMap(t *testing.T, client *fake.Clientset, ctx context.Context) []DNSRecord {
+	t.Helper()
+	recordsConfigMap, err := client.CoreV1().ConfigMaps("headscale").Get(ctx, "headscale-extra-records", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var records []DNSRecord
+	if err := json.Unmarshal([]byte(recordsConfigMap.Data["extra-records.json"]), &records); err != nil {
+		t.Fatal(err)
+	}
+	return records
+}
+
 func envContains(values []corev1.EnvVar, name string, value string) bool {
 	for _, item := range values {
 		if item.Name == name && item.Value == value {
@@ -615,21 +377,89 @@ func envContains(values []corev1.EnvVar, name string, value string) bool {
 	return false
 }
 
-func sourceService(namespace, name, hosts string) *corev1.Service {
+func plainService(namespace, name string, port int32) *corev1.Service {
 	return &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: namespace,
-			Annotations: map[string]string{
-				hostnameAnnotation: hosts,
-			},
+			Name:        name,
+			Namespace:   namespace,
+			Annotations: map[string]string{},
 		},
 		Spec: corev1.ServiceSpec{
 			Ports: []corev1.ServicePort{{
 				Name:       "http",
-				Port:       80,
+				Port:       port,
 				TargetPort: intstr.FromInt(8080),
 			}},
+		},
+	}
+}
+
+func sourceIngress(namespace, name, host, serviceName string, servicePort networkingv1.ServiceBackendPort) *networkingv1.Ingress {
+	ingressClass := "headscale"
+	pathType := networkingv1.PathTypePrefix
+	return &networkingv1.Ingress{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        name,
+			Namespace:   namespace,
+			Annotations: map[string]string{},
+		},
+		Spec: networkingv1.IngressSpec{
+			IngressClassName: &ingressClass,
+			Rules: []networkingv1.IngressRule{{
+				Host: host,
+				IngressRuleValue: networkingv1.IngressRuleValue{
+					HTTP: &networkingv1.HTTPIngressRuleValue{
+						Paths: []networkingv1.HTTPIngressPath{{
+							Path:     "/",
+							PathType: &pathType,
+							Backend: networkingv1.IngressBackend{
+								Service: &networkingv1.IngressServiceBackend{
+									Name: serviceName,
+									Port: servicePort,
+								},
+							},
+						}},
+					},
+				},
+			}},
+		},
+	}
+}
+
+func testProxySpec(name string) proxySpec {
+	return proxySpec{
+		name:            name + "-tailnet-sidecar",
+		authSecretName:  name + "-tailnet-authkey",
+		stateSecret:     "tailscale-" + name,
+		tailnetName:     name,
+		tlsSecretName:   "cluster-tls",
+		servicePort:     80,
+		hosts:           []string{name + ".cluster.example"},
+		sourceName:      name,
+		sourceNamespace: "apps",
+		routes: []proxyRoute{{
+			Path:             "/",
+			PathType:         networkingv1.PathTypePrefix,
+			ServiceName:      name,
+			ServiceNamespace: "apps",
+			ServicePort:      80,
+		}},
+	}
+}
+
+func testConfig() Config {
+	return Config{
+		AllowedZones:         []string{"cluster.example"},
+		HeadscaleNamespace:   "headscale",
+		RecordsConfigMapName: "headscale-extra-records",
+		RecordsConfigMapKey:  "extra-records.json",
+		IngressClassName:     "headscale",
+		Proxy: ProxyConfig{
+			Enabled:              true,
+			HeadscaleServerURL:   "https://headscale.example",
+			TailscaleImage:       "tailscale/tailscale:v1.98.3",
+			NginxImage:           "nginx:1.27-alpine",
+			DefaultTLSSecretName: "cluster-tls",
 		},
 	}
 }

@@ -24,6 +24,7 @@ func main() {
 	var recordsConfigMap string
 	var recordsKey string
 	var allowedZones string
+	var ingressClassName string
 	var proxyEnabled bool
 	var proxyHeadscaleServerURL string
 	var proxyTailscaleImage string
@@ -41,7 +42,8 @@ func main() {
 	flag.StringVar(&recordsConfigMap, "records-configmap", "headscale-extra-records", "Name of the Headscale records ConfigMap.")
 	flag.StringVar(&recordsKey, "records-key", "extra-records.json", "ConfigMap key containing Headscale extra_records_path JSON.")
 	flag.StringVar(&allowedZones, "allowed-zones", "", "Comma-separated DNS zones this operator may publish. Empty allows all hosts.")
-	flag.BoolVar(&proxyEnabled, "proxy-enabled", false, "Create managed tailnet proxy workloads for Services with the proxy annotation.")
+	flag.StringVar(&ingressClassName, "ingress-class", "headscale", "IngressClass name handled by this operator.")
+	flag.BoolVar(&proxyEnabled, "proxy-enabled", false, "Create managed tailnet proxy workloads for handled Ingresses.")
 	flag.StringVar(&proxyHeadscaleServerURL, "proxy-headscale-server-url", "", "Headscale server URL passed to managed proxy Tailscale containers.")
 	flag.StringVar(&proxyTailscaleImage, "proxy-tailscale-image", "", "Tailscale image for managed proxy workloads.")
 	flag.StringVar(&proxyNginxImage, "proxy-nginx-image", "", "nginx image for managed proxy workloads.")
@@ -63,6 +65,7 @@ func main() {
 		RecordsConfigMapName: recordsConfigMap,
 		RecordsConfigMapKey:  recordsKey,
 		AllowedZones:         splitCSV(allowedZones),
+		IngressClassName:     ingressClassName,
 		Proxy: operator.ProxyConfig{
 			Enabled:              proxyEnabled,
 			HeadscaleServerURL:   proxyHeadscaleServerURL,
@@ -106,7 +109,7 @@ func main() {
 			slog.Error("reconcile failed", "error", err)
 		} else {
 			slog.Info("reconciled",
-				"services", summary.SourceServices,
+				"ingresses", summary.SourceIngresses,
 				"records", summary.Records,
 				"skipped", summary.Skipped,
 			)

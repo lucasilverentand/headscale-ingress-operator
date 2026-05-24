@@ -1,16 +1,14 @@
 # Headscale Ingress Operator
 
-Kubernetes operator that publishes annotated Services into Headscale MagicDNS.
-It can also create an opt-in per-Service tailnet proxy workload so applications
-do not have to carry their own Tailscale sidecar manifests.
+Kubernetes operator that publishes Kubernetes Ingresses into Headscale MagicDNS
+and creates the per-app tailnet proxy workloads behind them.
 
 The intended user flow is:
 
 1. An app exposes a normal Kubernetes Service.
-2. The Service opts in with
-   `headscale-ingress-operator.lucasilverentand.dev/hostname`.
-3. The operator either resolves the Service target IPs directly or manages a
-   per-Service tailnet proxy.
+2. An Ingress with `ingressClassName: headscale` declares the host and backend.
+3. The operator creates a per-Ingress tailnet proxy, mints/adopts its Headscale
+   auth key, and discovers the proxy node IPs.
 4. The operator writes A/AAAA records into Headscale's managed
    `dns.extra_records_path` ConfigMap.
 5. Headscale serves those names through MagicDNS.
@@ -18,36 +16,30 @@ The intended user flow is:
 Example:
 
 ```yaml
-apiVersion: v1
-kind: Service
+apiVersion: networking.k8s.io/v1
+kind: Ingress
 metadata:
   name: whoami
   namespace: apps
-  annotations:
-    headscale-ingress-operator.lucasilverentand.dev/hostname: whoami.cluster.example
 spec:
-  ports:
-    - name: http
-      port: 80
-      targetPort: 8080
-  selector:
-    app.kubernetes.io/name: whoami
+  ingressClassName: headscale
+  rules:
+    - host: whoami.cluster.example
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: whoami
+                port:
+                  number: 80
 ```
-
-By default the operator publishes IPs from, in order:
-
-- `.status.loadBalancer.ingress[].ip`
-- `.spec.externalIPs`
-- `.spec.clusterIPs`
-
-For unusual cases, set
-`headscale-ingress-operator.lucasilverentand.dev/target-ip` to a comma-separated
-list of explicit A/AAAA targets.
 
 The design is intentionally private-data-free. Examples use placeholder domains
 and addresses.
 
-See [docs/design.md](docs/design.md) for the Service-to-MagicDNS design,
+See [docs/design.md](docs/design.md) for the Ingress-to-MagicDNS design,
 managed proxy mode, and setup notes.
 
 ## Current Status
@@ -58,12 +50,11 @@ GitHub releases.
 Implemented:
 
 - Go controller loop using `client-go`
-- Service reconciliation through a hostname annotation
+- Ingress reconciliation through `ingressClassName: headscale`
 - Headscale `extra_records_path` JSON written to an operator-owned ConfigMap
-- service status annotation updates
-- optional per-Service tailnet proxy Deployments
+- Ingress status annotation updates and load balancer status updates
+- per-Ingress tailnet proxy Deployments
 - ownership checks that refuse unmanaged records ConfigMaps
-- local fake Kubernetes API tests
 - deployable Kubernetes YAML under `deploy/`
 - Helm chart under `charts/headscale-ingress-operator`
 - container image publishing to `ghcr.io/lucasilverentand/headscale-ingress-operator`
@@ -85,8 +76,6 @@ mise exec -- make verify
 The test suite includes:
 
 - reconciliation tests using `k8s.io/client-go/kubernetes/fake`
-- a local `httptest` fake Kubernetes API server that the real client-go client
-  talks to over HTTP
 
 Build the operator binary:
 
@@ -116,10 +105,9 @@ helm install headscale-ingress-operator \
 The chart defaults to `ghcr.io/lucasilverentand/headscale-ingress-operator`
 and uses the chart `appVersion` as the image tag unless `image.tag` is set.
 
-## Managed Tailnet Proxies
+## Managed Tailnet Ingresses
 
-By default the operator only publishes DNS records. Enable managed proxy support
-in the chart before using proxy annotations:
+Enable managed proxy support in the chart before using Headscale Ingresses:
 
 ```yaml
 headscale:
@@ -132,32 +120,42 @@ proxy:
   defaultTLSSecret: wildcard-example-tls
 ```
 
-Then opt a Service into per-app proxy management:
+Then declare a normal Ingress:
 
 ```yaml
-apiVersion: v1
-kind: Service
+apiVersion: networking.k8s.io/v1
+kind: Ingress
 metadata:
   name: whoami
   namespace: apps
-  annotations:
-    headscale-ingress-operator.lucasilverentand.dev/hostname: whoami.cluster.example
-    headscale-ingress-operator.lucasilverentand.dev/target-ip: 100.64.0.10
-    headscale-ingress-operator.lucasilverentand.dev/proxy: managed
 spec:
-  ports:
-    - name: http
-      port: 80
-      targetPort: 8080
-  selector:
-    app.kubernetes.io/name: whoami
+  ingressClassName: headscale
+  rules:
+    - host: whoami.cluster.example
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: whoami
+                port:
+                  name: http
 ```
 
-In managed mode, the operator creates a per-Service proxy Deployment in the
-Service namespace. The proxy joins Headscale as one app-specific node, runs
+The operator creates a per-Ingress proxy Deployment in the Ingress namespace.
+The proxy joins Headscale as one app-specific node, runs
 `tailscale serve` on TCP/443, terminates TLS with nginx, and forwards to the
-Kubernetes Service. The `target-ip` annotation remains the DNS target for the
-app's stable Headscale IP.
+Ingress backend Service. The operator discovers the app node's Headscale IPs and
+publishes those as DNS targets.
+
+The app-side ideal is:
+
+1. Deploy the app Pod or Deployment.
+2. Expose the app with a normal Kubernetes Service port.
+3. Declare a `headscale` Ingress.
+
+Everything else is created and reconciled by the operator.
 
 Useful optional annotations:
 
@@ -165,7 +163,6 @@ Useful optional annotations:
 - `headscale-ingress-operator.lucasilverentand.dev/proxy-auth-secret`
 - `headscale-ingress-operator.lucasilverentand.dev/proxy-state-secret`
 - `headscale-ingress-operator.lucasilverentand.dev/proxy-tailnet-name`
-- `headscale-ingress-operator.lucasilverentand.dev/proxy-service-port`
 
 ## Headscale `extra_records_path`
 

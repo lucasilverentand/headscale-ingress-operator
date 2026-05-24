@@ -1,67 +1,59 @@
-# Service MagicDNS and Tailnet Proxy Design
+# Headscale Ingress and Tailnet Proxy Design
 
-The operator has one job: publish annotated Kubernetes Services into Headscale
-MagicDNS. It can optionally own the per-Service tailnet proxy workload that
-backs the published Headscale address.
+The operator has one job: turn a normal Kubernetes Ingress into a Headscale
+reachable HTTP endpoint. It owns the per-app tailnet proxy workload and the
+Headscale DNS records behind that endpoint.
 
 ## Source Resource
 
-Applications expose normal Services. A Service is published only when it has a
-hostname annotation:
+Applications expose normal Services. A Headscale route is declared with a
+standard Ingress using the operator's IngressClass:
 
 ```yaml
-apiVersion: v1
-kind: Service
+apiVersion: networking.k8s.io/v1
+kind: Ingress
 metadata:
   name: whoami
   namespace: apps
-  annotations:
-    headscale-ingress-operator.lucasilverentand.dev/hostname: whoami.cluster.example
 spec:
-  ports:
-    - name: http
-      port: 80
-      targetPort: 8080
-  selector:
-    app.kubernetes.io/name: whoami
+  ingressClassName: headscale
+  rules:
+    - host: whoami.cluster.example
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: whoami
+                port:
+                  number: 80
 ```
 
-The hostname annotation may contain a comma-separated list of DNS names. The
-operator validates each name, rejects wildcards, and applies the configured
-allowed-zone list before writing anything to Headscale.
+That is the preferred app-side API. The app declares a Pod or Deployment, exposes
+a Service port, and declares an Ingress. The operator creates everything else:
+auth key Secret, tailnet proxy Deployment, nginx config, RBAC, DNS records, and
+Ingress status.
+
+The operator does not publish annotated Services directly. Services are only
+backend targets referenced by Ingress rules.
+
+The operator validates each hostname, rejects wildcards, and applies the
+configured allowed-zone list before writing anything to Headscale.
 
 ## DNS Targets
 
-The operator publishes A/AAAA records using these Service addresses:
-
-1. `.status.loadBalancer.ingress[].ip`
-2. `.spec.externalIPs`
-3. `.spec.clusterIPs`
-
-Headless Services without an explicit target stay pending because there is no
-single A/AAAA target to publish.
-
-For the small number of cases where the Service address is not the address that
-Headscale clients should use, a Service may set:
-
-```yaml
-headscale-ingress-operator.lucasilverentand.dev/target-ip: 100.64.0.10,fd7a:115c:a1e0::10
-```
-
-In DNS-only mode that annotation is just DNS target selection. In managed proxy
-mode it is optional: when omitted, the operator discovers the app-specific
-Headscale node by tailnet name and publishes the node's assigned IPs.
+For Ingress sources, DNS targets are the Headscale node IPs assigned to the
+operator-managed proxy. The operator discovers those IPs from Headscale by the
+proxy tailnet name.
 
 ## Managed Proxy Mode
 
-Managed proxy mode is opt-in at two levels:
+Ingress sources always use managed proxy mode. The chart must enable proxy
+management before Ingress sources can reconcile successfully.
 
-1. The chart must enable proxy management.
-2. The Service must set
-   `headscale-ingress-operator.lucasilverentand.dev/proxy: managed`.
-
-When both are true, the operator creates per-Service resources in the Service
-namespace:
+When managed proxy mode is active, the operator creates per-source resources in
+the source namespace:
 
 - ServiceAccount
 - Role and RoleBinding for the proxy's Tailscale state Secret
@@ -71,19 +63,18 @@ namespace:
 
 The proxy joins Headscale with an app-specific node name, runs
 `tailscale serve --tcp 443`, terminates TLS on localhost with nginx, and
-forwards traffic to the Kubernetes Service DNS name. The operator mints the
-preauth key by executing the Headscale CLI in the configured Headscale pod,
-then writes the key into the Service namespace.
+forwards traffic to the backend Service DNS name declared by the Ingress. The
+operator mints the preauth key by executing the Headscale CLI in the configured
+Headscale pod, then writes the key into the source namespace.
 
-Per-Service annotations override defaults:
+Ingress annotations override defaults:
 
 | Annotation | Purpose |
 | --- | --- |
 | `headscale-ingress-operator.lucasilverentand.dev/proxy-tls-secret` | TLS Secret mounted into nginx. |
-| `headscale-ingress-operator.lucasilverentand.dev/proxy-auth-secret` | Secret containing `TS_AUTHKEY`. Defaults to `<service>-tailnet-authkey`. |
-| `headscale-ingress-operator.lucasilverentand.dev/proxy-state-secret` | Secret used by `TS_KUBE_SECRET`. Defaults to `tailscale-<service>`. |
-| `headscale-ingress-operator.lucasilverentand.dev/proxy-tailnet-name` | Headscale/Tailscale node name. Defaults to the Service name. |
-| `headscale-ingress-operator.lucasilverentand.dev/proxy-service-port` | Service port forwarded by nginx. Defaults to the first Service port. |
+| `headscale-ingress-operator.lucasilverentand.dev/proxy-auth-secret` | Secret containing `TS_AUTHKEY`. Defaults to `<source>-tailnet-authkey`. |
+| `headscale-ingress-operator.lucasilverentand.dev/proxy-state-secret` | Secret used by `TS_KUBE_SECRET`. Defaults to `tailscale-<source>`. |
+| `headscale-ingress-operator.lucasilverentand.dev/proxy-tailnet-name` | Headscale/Tailscale node name. Defaults to the source name. |
 
 This keeps the Headscale identity per application. It does not create one shared
 gateway node for all applications.
@@ -141,33 +132,33 @@ seed it while preserving the live value on upgrades.
 
 Each loop:
 
-1. List Services across namespaces.
-2. Keep only Services with
-   `headscale-ingress-operator.lucasilverentand.dev/hostname`.
+1. List Ingresses across namespaces.
+2. Keep Ingresses with `ingressClassName: headscale`.
 3. Validate hostnames and reject duplicate claims.
-4. Resolve Service target IPs.
-5. Mint an app auth key and reconcile an app-specific proxy workload when the
-   Service opts into managed proxy mode.
-6. Discover the app Headscale node IPs unless explicit target IPs are set.
+4. Resolve Ingress backend Service routes.
+5. Mint an app auth key and reconcile an app-specific proxy workload.
+6. Discover the app Headscale node IPs.
 7. Render deterministic Headscale `extra_records_path` JSON.
-8. Patch each participating Service with a small status annotation.
-9. Delete generated proxy resources for Services that no longer opt in.
+8. Patch each participating Ingress with a small status annotation and update
+   Ingress load balancer status with the Headscale node IPs.
+9. Delete generated proxy resources for Ingresses that no longer opt in.
 
 Status values:
 
 | Value | Meaning |
 | --- | --- |
-| `Ready` | The Service has valid hostnames and at least one published A/AAAA target. |
-| `PendingTarget` | The Service opted in but has no usable A/AAAA target yet. |
+| `Ready` | The Ingress has valid hostnames and at least one published A/AAAA target. |
 | `PendingAuthKey` | Managed proxy mode is waiting for a Headscale preauth key. |
 | `PendingNodeIP` | Managed proxy mode is waiting for the app node to appear in Headscale. |
-| `Rejected` | The Service has invalid hostnames, conflicting hostnames, or invalid target IPs. |
+| `Rejected` | The Ingress has invalid hostnames, conflicting hostnames, or invalid backends. |
 
 ## Permissions
 
 The operator needs:
 
-- cluster-wide `get`, `list`, `watch`, and `patch` on Services
+- `get` on backend Services
+- cluster-wide `get`, `list`, `watch`, and `patch` on Ingresses
+- `get`, `update`, and `patch` on Ingress status
 - `get`, `update`, and `patch` on the managed records ConfigMap
 - `create` on ConfigMaps in the Headscale namespace
 - `get`, `list`, `watch`, `create`, `update`, and `patch` on generated
@@ -177,15 +168,15 @@ The operator needs:
   Headscale namespace when managed proxy mode mints auth keys or discovers node
   IPs
 
-Generated proxy resources are owned by the source Service, so normal Kubernetes
-garbage collection removes them when the Service is deleted.
+Generated proxy resources are owned by the Ingress, so normal Kubernetes
+garbage collection removes them when the Ingress is deleted.
 
 ## Safety Rules
 
-- Empty hostname annotation means the Service is ignored.
+- Ingresses are ignored unless they use the configured IngressClass.
 - Wildcard hostnames are rejected.
 - Hostnames outside `--allowed-zones` are rejected when zones are configured.
-- Two Services may not claim the same hostname.
+- Two Ingresses may not claim the same hostname.
 - DNS records are only A/AAAA records.
 - Unspecified and multicast IPs are rejected.
 - Unmanaged records ConfigMaps are never overwritten.

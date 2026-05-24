@@ -34,6 +34,7 @@ spec:
             - --records-configmap=headscale-extra-records
             - --records-key=extra-records.json
             - --allowed-zones=cluster.example
+            - --ingress-class=headscale
           resources:
             requests:
               cpu: 25m

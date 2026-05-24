@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -16,17 +17,13 @@ import (
 )
 
 const (
-	managedByValue     = "headscale-ingress-operator"
-	hostnameAnnotation = "headscale-ingress-operator.lucasilverentand.dev/hostname"
-	statusAnnotation   = "headscale-ingress-operator.lucasilverentand.dev/status"
-	targetIPAnnotation = "headscale-ingress-operator.lucasilverentand.dev/target-ip"
-	proxyAnnotation    = "headscale-ingress-operator.lucasilverentand.dev/proxy"
-	managedByLabel     = "app.kubernetes.io/managed-by"
-	statusReady        = "Ready"
-	statusPending      = "PendingTarget"
-	statusPendingAuth  = "PendingAuthKey"
-	statusPendingNode  = "PendingNodeIP"
-	statusRejected     = "Rejected"
+	managedByValue    = "headscale-ingress-operator"
+	statusAnnotation  = "headscale-ingress-operator.lucasilverentand.dev/status"
+	managedByLabel    = "app.kubernetes.io/managed-by"
+	statusReady       = "Ready"
+	statusPendingAuth = "PendingAuthKey"
+	statusPendingNode = "PendingNodeIP"
+	statusRejected    = "Rejected"
 )
 
 type Reconciler struct {
@@ -36,14 +33,47 @@ type Reconciler struct {
 }
 
 type Summary struct {
-	SourceServices int
-	Records        int
-	Skipped        []string
+	SourceIngresses int
+	Records         int
+	Skipped         []string
 }
 
-type serviceMark struct {
-	service corev1.Service
+type sourceRef struct {
+	apiVersion string
+	namespace  string
+	name       string
+	uid        types.UID
+}
+
+type source struct {
+	ref      sourceRef
+	hosts    []string
+	ingress  *networkingv1.Ingress
+	routes   []proxyRoute
+	routeErr error
+}
+
+func (source source) id() string {
+	return source.ref.namespace + "/" + source.ref.name
+}
+
+func (source source) activeKey() string {
+	return source.ref.namespace + "/" + source.ref.name
+}
+
+func (source source) ownerReference() metav1.OwnerReference {
+	return metav1.OwnerReference{
+		APIVersion: source.ref.apiVersion,
+		Kind:       "Ingress",
+		Name:       source.ref.name,
+		UID:        source.ref.uid,
+	}
+}
+
+type sourceMark struct {
+	source  source
 	status  string
+	targets []string
 }
 
 func (reconciler Reconciler) Reconcile(ctx context.Context) (Summary, error) {
@@ -55,25 +85,22 @@ func (reconciler Reconciler) Reconcile(ctx context.Context) (Summary, error) {
 		return Summary{}, fmt.Errorf("kubernetes client is required")
 	}
 
-	list, err := reconciler.Client.CoreV1().Services("").List(ctx, metav1.ListOptions{})
+	ingressList, err := reconciler.Client.NetworkingV1().Ingresses("").List(ctx, metav1.ListOptions{})
 	if err != nil {
-		return Summary{}, fmt.Errorf("list services: %w", err)
+		return Summary{}, fmt.Errorf("list ingresses: %w", err)
 	}
 
 	summary := Summary{}
 	records := []DNSRecord{}
-	readyMarks := []serviceMark{}
+	readyMarks := []sourceMark{}
 	hostOwners := map[string]map[string]struct{}{}
 
 	activeProxies := map[string]struct{}{}
+	sources := reconciler.sourcesFor(ctx, config, ingressList.Items)
 
-	for i := range list.Items {
-		service := list.Items[i]
-		if !serviceOptedIn(service) {
-			continue
-		}
-		sourceID := service.Namespace + "/" + service.Name
-		for _, host := range hostsForService(service) {
+	for _, source := range sources {
+		sourceID := "Ingress/" + source.id()
+		for _, host := range source.hosts {
 			if hostOwners[host] == nil {
 				hostOwners[host] = map[string]struct{}{}
 			}
@@ -81,18 +108,13 @@ func (reconciler Reconciler) Reconcile(ctx context.Context) (Summary, error) {
 		}
 	}
 
-	for i := range list.Items {
-		service := list.Items[i]
-		if !serviceOptedIn(service) {
-			continue
-		}
-
-		summary.SourceServices++
-		sourceID := service.Namespace + "/" + service.Name
-		hosts := hostsForService(service)
+	for _, source := range sources {
+		summary.SourceIngresses++
+		sourceID := "Ingress/" + source.id()
+		hosts := source.hosts
 		if len(hosts) == 0 {
 			summary.Skipped = append(summary.Skipped, sourceID+": no hostnames declared")
-			if err := reconciler.markService(ctx, service, statusRejected); err != nil {
+			if err := reconciler.markSource(ctx, source, statusRejected, nil); err != nil {
 				return summary, err
 			}
 			continue
@@ -100,83 +122,77 @@ func (reconciler Reconciler) Reconcile(ctx context.Context) (Summary, error) {
 
 		if invalidHost, reason := firstRejectedHost(hosts, config.AllowedZones); invalidHost != "" {
 			summary.Skipped = append(summary.Skipped, sourceID+": host "+invalidHost+" "+reason)
-			if err := reconciler.markService(ctx, service, statusRejected); err != nil {
+			if err := reconciler.markSource(ctx, source, statusRejected, nil); err != nil {
 				return summary, err
 			}
 			continue
 		}
 
 		if conflictingHost := firstConflictingHost(hosts, hostOwners, sourceID); conflictingHost != "" {
-			summary.Skipped = append(summary.Skipped, sourceID+": host "+conflictingHost+" is claimed by another headscale service")
-			if err := reconciler.markService(ctx, service, statusRejected); err != nil {
+			summary.Skipped = append(summary.Skipped, sourceID+": host "+conflictingHost+" is claimed by another headscale source")
+			if err := reconciler.markSource(ctx, source, statusRejected, nil); err != nil {
+				return summary, err
+			}
+			continue
+		}
+		if source.routeErr != nil {
+			summary.Skipped = append(summary.Skipped, sourceID+": "+source.routeErr.Error())
+			if err := reconciler.markSource(ctx, source, statusRejected, nil); err != nil {
+				return summary, err
+			}
+			continue
+		}
+		if !config.Proxy.Enabled {
+			summary.Skipped = append(summary.Skipped, sourceID+": proxy management is disabled")
+			if err := reconciler.markSource(ctx, source, statusRejected, nil); err != nil {
 				return summary, err
 			}
 			continue
 		}
 
 		var targets []string
-		if proxyEnabledForService(service) {
-			activeProxies[service.Namespace+"/"+service.Name] = struct{}{}
-			spec, err := desiredProxySpec(config, service, hosts)
-			if err != nil {
-				summary.Skipped = append(summary.Skipped, sourceID+": "+err.Error())
-				if err := reconciler.markService(ctx, service, statusRejected); err != nil {
-					return summary, err
-				}
-				continue
+		activeProxies[source.activeKey()] = struct{}{}
+		spec, err := desiredProxySpec(config, source)
+		if err != nil {
+			summary.Skipped = append(summary.Skipped, sourceID+": "+err.Error())
+			if err := reconciler.markSource(ctx, source, statusRejected, nil); err != nil {
+				return summary, err
 			}
-			if err := reconciler.ensureProxyAuthSecret(ctx, service, spec); err != nil {
-				summary.Skipped = append(summary.Skipped, sourceID+": "+err.Error())
-				if err := reconciler.markService(ctx, service, statusPendingAuth); err != nil {
-					return summary, err
-				}
-				continue
+			continue
+		}
+		if err := reconciler.ensureProxyAuthSecret(ctx, source, spec); err != nil {
+			summary.Skipped = append(summary.Skipped, sourceID+": "+err.Error())
+			if err := reconciler.markSource(ctx, source, statusPendingAuth, nil); err != nil {
+				return summary, err
 			}
-			if err := reconciler.reconcileProxy(ctx, config, service, spec); err != nil {
-				summary.Skipped = append(summary.Skipped, sourceID+": "+err.Error())
-				if markErr := reconciler.markService(ctx, service, statusRejected); markErr != nil {
-					return summary, markErr
-				}
-				continue
+			continue
+		}
+		if err := reconciler.reconcileProxy(ctx, config, source, spec); err != nil {
+			summary.Skipped = append(summary.Skipped, sourceID+": "+err.Error())
+			if markErr := reconciler.markSource(ctx, source, statusRejected, nil); markErr != nil {
+				return summary, markErr
 			}
-
-			targets, err = reconciler.proxyTargetIPs(ctx, service, spec)
-			if err != nil {
-				summary.Skipped = append(summary.Skipped, sourceID+": "+err.Error())
-				if err := reconciler.markService(ctx, service, statusRejected); err != nil {
-					return summary, err
-				}
-				continue
-			}
-			if len(targets) == 0 {
-				summary.Skipped = append(summary.Skipped, sourceID+": no Headscale node IPs resolved for "+spec.tailnetName)
-				if err := reconciler.markService(ctx, service, statusPendingNode); err != nil {
-					return summary, err
-				}
-				continue
-			}
-		} else {
-			var err error
-			targets, err = targetIPsForService(service)
-			if err != nil {
-				summary.Skipped = append(summary.Skipped, sourceID+": "+err.Error())
-				if err := reconciler.markService(ctx, service, statusRejected); err != nil {
-					return summary, err
-				}
-				continue
-			}
+			continue
 		}
 
+		targets, err = reconciler.proxyTargetIPs(ctx, spec)
+		if err != nil {
+			summary.Skipped = append(summary.Skipped, sourceID+": "+err.Error())
+			if err := reconciler.markSource(ctx, source, statusRejected, nil); err != nil {
+				return summary, err
+			}
+			continue
+		}
 		if len(targets) == 0 {
-			summary.Skipped = append(summary.Skipped, sourceID+": no A/AAAA target resolved")
-			if err := reconciler.markService(ctx, service, statusPending); err != nil {
+			summary.Skipped = append(summary.Skipped, sourceID+": no Headscale node IPs resolved for "+spec.tailnetName)
+			if err := reconciler.markSource(ctx, source, statusPendingNode, nil); err != nil {
 				return summary, err
 			}
 			continue
 		}
 
 		records = append(records, recordsFor(hosts, targets)...)
-		readyMarks = append(readyMarks, serviceMark{service: service, status: statusReady})
+		readyMarks = append(readyMarks, sourceMark{source: source, status: statusReady, targets: targets})
 	}
 
 	records = dedupeRecords(records)
@@ -184,7 +200,7 @@ func (reconciler Reconciler) Reconcile(ctx context.Context) (Summary, error) {
 		return summary, err
 	}
 	for _, mark := range readyMarks {
-		if err := reconciler.markService(ctx, mark.service, mark.status); err != nil {
+		if err := reconciler.markSource(ctx, mark.source, mark.status, mark.targets); err != nil {
 			return summary, err
 		}
 	}
@@ -195,22 +211,45 @@ func (reconciler Reconciler) Reconcile(ctx context.Context) (Summary, error) {
 	return summary, nil
 }
 
-func proxyEnabledForService(service corev1.Service) bool {
-	value := strings.TrimSpace(strings.ToLower(service.Annotations[proxyAnnotation]))
-	return value == "true" || value == "managed"
+func (reconciler Reconciler) sourcesFor(ctx context.Context, config Config, ingresses []networkingv1.Ingress) []source {
+	sources := []source{}
+	for i := range ingresses {
+		ingress := ingresses[i]
+		if !ingressOptedIn(ingress, config.IngressClassName) {
+			continue
+		}
+		routes, err := reconciler.routesForIngress(ctx, ingress)
+		sources = append(sources, source{
+			ref: sourceRef{
+				apiVersion: networkingv1.SchemeGroupVersion.String(),
+				namespace:  ingress.Namespace,
+				name:       ingress.Name,
+				uid:        ingress.UID,
+			},
+			hosts:    hostsForIngress(ingress),
+			ingress:  &ingress,
+			routes:   routes,
+			routeErr: err,
+		})
+	}
+	return sources
 }
 
-func (reconciler Reconciler) proxyTargetIPs(ctx context.Context, service corev1.Service, spec proxySpec) ([]string, error) {
-	if targets, ok, err := explicitTargetIPsFor(service); ok || err != nil {
-		return targets, err
-	}
+func (reconciler Reconciler) proxyTargetIPs(ctx context.Context, spec proxySpec) ([]string, error) {
 	if reconciler.Headscale == nil {
-		return nil, fmt.Errorf("managed proxy without target-ip requires a Headscale client")
+		return nil, fmt.Errorf("managed proxy requires a Headscale client")
 	}
 	return reconciler.Headscale.NodeIPs(ctx, spec.tailnetName)
 }
 
-func (reconciler Reconciler) markService(ctx context.Context, service corev1.Service, status string) error {
+func (reconciler Reconciler) markSource(ctx context.Context, source source, status string, targets []string) error {
+	if err := reconciler.markIngress(ctx, *source.ingress, status, targets); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (reconciler Reconciler) markIngress(ctx context.Context, ingress networkingv1.Ingress, status string, targets []string) error {
 	metadataPatch, err := json.Marshal(map[string]any{
 		"metadata": map[string]any{
 			"annotations": map[string]string{
@@ -221,13 +260,25 @@ func (reconciler Reconciler) markService(ctx context.Context, service corev1.Ser
 	if err != nil {
 		return err
 	}
-
-	_, err = reconciler.Client.CoreV1().Services(service.Namespace).Patch(ctx, service.Name, types.MergePatchType, metadataPatch, metav1.PatchOptions{})
+	client := reconciler.Client.NetworkingV1().Ingresses(ingress.Namespace)
+	updated, err := client.Patch(ctx, ingress.Name, types.MergePatchType, metadataPatch, metav1.PatchOptions{})
 	if apierrors.IsNotFound(err) {
 		return nil
 	}
 	if err != nil {
-		return fmt.Errorf("patch service annotation %s/%s: %w", service.Namespace, service.Name, err)
+		return fmt.Errorf("patch ingress annotation %s/%s: %w", ingress.Namespace, ingress.Name, err)
+	}
+	if status != statusReady || len(targets) == 0 {
+		return nil
+	}
+	statusIngress := ingressLoadBalancerStatus(targets)
+	if loadBalancerStatusEqual(updated.Status.LoadBalancer.Ingress, statusIngress) {
+		return nil
+	}
+	statusCopy := updated.DeepCopy()
+	statusCopy.Status.LoadBalancer.Ingress = statusIngress
+	if _, err := client.UpdateStatus(ctx, statusCopy, metav1.UpdateOptions{}); err != nil {
+		return fmt.Errorf("update ingress status %s/%s: %w", ingress.Namespace, ingress.Name, err)
 	}
 	return nil
 }
@@ -279,14 +330,17 @@ func (reconciler Reconciler) publishRecords(ctx context.Context, config Config, 
 	return nil
 }
 
-func serviceOptedIn(service corev1.Service) bool {
-	return strings.TrimSpace(service.Annotations[hostnameAnnotation]) != ""
+func ingressOptedIn(ingress networkingv1.Ingress, ingressClassName string) bool {
+	if ingress.Spec.IngressClassName != nil && strings.TrimSpace(*ingress.Spec.IngressClassName) == ingressClassName {
+		return true
+	}
+	return strings.TrimSpace(ingress.Annotations["kubernetes.io/ingress.class"]) == ingressClassName
 }
 
-func hostsForService(service corev1.Service) []string {
+func hostsForIngress(ingress networkingv1.Ingress) []string {
 	hosts := map[string]struct{}{}
-	for _, host := range strings.Split(service.Annotations[hostnameAnnotation], ",") {
-		host = normalizeHost(host)
+	for _, rule := range ingress.Spec.Rules {
+		host := normalizeHost(rule.Host)
 		if host != "" {
 			hosts[host] = struct{}{}
 		}
@@ -298,6 +352,72 @@ func hostsForService(service corev1.Service) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+func (reconciler Reconciler) routesForIngress(ctx context.Context, ingress networkingv1.Ingress) ([]proxyRoute, error) {
+	var routes []proxyRoute
+	for _, rule := range ingress.Spec.Rules {
+		host := normalizeHost(rule.Host)
+		if host == "" || rule.HTTP == nil {
+			continue
+		}
+		for _, path := range rule.HTTP.Paths {
+			if path.Backend.Service == nil {
+				return nil, fmt.Errorf("Ingress path for host %s does not use a Service backend", host)
+			}
+			serviceName := strings.TrimSpace(path.Backend.Service.Name)
+			if serviceName == "" {
+				return nil, fmt.Errorf("Ingress path for host %s has an empty Service backend name", host)
+			}
+			servicePort, err := reconciler.ingressBackendServicePort(ctx, ingress.Namespace, serviceName, path.Backend.Service.Port)
+			if err != nil {
+				return nil, err
+			}
+			pathValue := strings.TrimSpace(path.Path)
+			if pathValue == "" {
+				pathValue = "/"
+			}
+			if !strings.HasPrefix(pathValue, "/") {
+				return nil, fmt.Errorf("Ingress path for host %s must start with /", host)
+			}
+			pathType := networkingv1.PathTypePrefix
+			if path.PathType != nil {
+				pathType = *path.PathType
+			}
+			routes = append(routes, proxyRoute{
+				Host:             host,
+				Path:             pathValue,
+				PathType:         pathType,
+				ServiceName:      serviceName,
+				ServiceNamespace: ingress.Namespace,
+				ServicePort:      servicePort,
+			})
+		}
+	}
+	if len(routes) == 0 {
+		return nil, fmt.Errorf("Ingress has no routable HTTP Service paths")
+	}
+	return routes, nil
+}
+
+func (reconciler Reconciler) ingressBackendServicePort(ctx context.Context, namespace string, serviceName string, servicePort networkingv1.ServiceBackendPort) (int32, error) {
+	if servicePort.Number > 0 {
+		return servicePort.Number, nil
+	}
+	portName := strings.TrimSpace(servicePort.Name)
+	if portName == "" {
+		return 0, fmt.Errorf("Ingress backend %s/%s must name a Service port or port number", namespace, serviceName)
+	}
+	service, err := reconciler.Client.CoreV1().Services(namespace).Get(ctx, serviceName, metav1.GetOptions{})
+	if err != nil {
+		return 0, fmt.Errorf("get Ingress backend Service %s/%s: %w", namespace, serviceName, err)
+	}
+	for _, port := range service.Spec.Ports {
+		if port.Name == portName {
+			return port.Port, nil
+		}
+	}
+	return 0, fmt.Errorf("Ingress backend Service %s/%s has no port named %s", namespace, serviceName, portName)
 }
 
 func firstRejectedHost(hosts []string, zones []string) (string, string) {
@@ -341,50 +461,22 @@ func hostAllowed(host string, zones []string) bool {
 	return false
 }
 
-func targetIPsForService(service corev1.Service) ([]string, error) {
-	if targets, ok, err := explicitTargetIPsFor(service); ok || err != nil {
-		return targets, err
+func ingressLoadBalancerStatus(targets []string) []networkingv1.IngressLoadBalancerIngress {
+	status := make([]networkingv1.IngressLoadBalancerIngress, 0, len(targets))
+	for _, target := range targets {
+		status = append(status, networkingv1.IngressLoadBalancerIngress{IP: target})
 	}
-
-	var candidates []string
-	for _, item := range service.Status.LoadBalancer.Ingress {
-		if item.IP != "" {
-			candidates = append(candidates, item.IP)
-		}
-	}
-	candidates = append(candidates, service.Spec.ExternalIPs...)
-	for _, clusterIP := range service.Spec.ClusterIPs {
-		if serviceIPUsable(clusterIP) {
-			candidates = append(candidates, clusterIP)
-		}
-	}
-	if len(service.Spec.ClusterIPs) == 0 && serviceIPUsable(service.Spec.ClusterIP) {
-		candidates = append(candidates, service.Spec.ClusterIP)
-	}
-
-	targets, err := normalizeIPs(candidates)
-	if err != nil {
-		return nil, fmt.Errorf("invalid service target IP: %w", err)
-	}
-	return targets, nil
+	return status
 }
 
-func serviceIPUsable(value string) bool {
-	value = strings.TrimSpace(value)
-	return value != "" && value != corev1.ClusterIPNone
-}
-
-func explicitTargetIPsFor(service corev1.Service) ([]string, bool, error) {
-	raw := strings.TrimSpace(service.Annotations[targetIPAnnotation])
-	if raw == "" {
-		return nil, false, nil
+func loadBalancerStatusEqual(left, right []networkingv1.IngressLoadBalancerIngress) bool {
+	if len(left) != len(right) {
+		return false
 	}
-	targets, err := normalizeIPs(strings.Split(raw, ","))
-	if err != nil {
-		return nil, true, fmt.Errorf("invalid target IP annotation: %w", err)
+	for i := range left {
+		if left[i].IP != right[i].IP || left[i].Hostname != right[i].Hostname {
+			return false
+		}
 	}
-	if len(targets) == 0 {
-		return nil, true, fmt.Errorf("invalid target IP annotation: must contain at least one IP")
-	}
-	return targets, true, nil
+	return true
 }

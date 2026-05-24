@@ -1,6 +1,6 @@
 apiVersion: v2
 name: headscale-ingress-operator
-description: Publish Kubernetes Services into Headscale MagicDNS.
+description: Publish Kubernetes Ingresses into Headscale MagicDNS.
 type: application
 version: 1.2.0
 appVersion: 1.2.0
