@@ -11,6 +11,7 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -21,74 +22,76 @@ const (
 	proxyAuthSecretAnnotation  = "headscale-ingress-operator.lucasilverentand.dev/proxy-auth-secret"
 	proxyStateSecretAnnotation = "headscale-ingress-operator.lucasilverentand.dev/proxy-state-secret"
 	proxyTailnetNameAnnotation = "headscale-ingress-operator.lucasilverentand.dev/proxy-tailnet-name"
-	proxyServicePortAnnotation = "headscale-ingress-operator.lucasilverentand.dev/proxy-service-port"
 	proxyComponentLabel        = "headscale-ingress-operator.lucasilverentand.dev/component"
 	proxySourceNamespaceLabel  = "headscale-ingress-operator.lucasilverentand.dev/source-namespace"
 	proxySourceNameLabel       = "headscale-ingress-operator.lucasilverentand.dev/source-name"
+	proxySourceKindLabel       = "headscale-ingress-operator.lucasilverentand.dev/source-kind"
 	proxyComponentValue        = "tailnet-proxy"
 )
 
-type proxySpec struct {
-	name           string
-	tlsSecretName  string
-	authSecretName string
-	stateSecret    string
-	tailnetName    string
-	servicePort    int32
-	hosts          []string
+type proxyRoute struct {
+	Host             string
+	Path             string
+	PathType         networkingv1.PathType
+	ServiceName      string
+	ServiceNamespace string
+	ServicePort      int32
 }
 
-func (reconciler Reconciler) reconcileProxy(ctx context.Context, config Config, service corev1.Service, spec proxySpec) error {
+type proxySpec struct {
+	name            string
+	tlsSecretName   string
+	authSecretName  string
+	stateSecret     string
+	tailnetName     string
+	servicePort     int32
+	hosts           []string
+	routes          []proxyRoute
+	sourceName      string
+	sourceNamespace string
+}
+
+func (reconciler Reconciler) reconcileProxy(ctx context.Context, config Config, source source, spec proxySpec) error {
 	if !config.Proxy.Enabled {
 		return nil
 	}
 
-	owner := metav1.OwnerReference{
-		APIVersion: "v1",
-		Kind:       "Service",
-		Name:       service.Name,
-		UID:        service.UID,
-	}
-	if err := reconciler.upsertServiceAccount(ctx, service.Namespace, desiredProxyServiceAccount(spec, owner)); err != nil {
+	owner := source.ownerReference()
+	if err := reconciler.upsertServiceAccount(ctx, source.ref.namespace, desiredProxyServiceAccount(spec, owner)); err != nil {
 		return err
 	}
-	if err := reconciler.upsertRole(ctx, service.Namespace, desiredProxyRole(spec, owner)); err != nil {
+	if err := reconciler.upsertRole(ctx, source.ref.namespace, desiredProxyRole(spec, owner)); err != nil {
 		return err
 	}
-	if err := reconciler.upsertRoleBinding(ctx, service.Namespace, desiredProxyRoleBinding(spec, owner)); err != nil {
+	if err := reconciler.upsertRoleBinding(ctx, source.ref.namespace, desiredProxyRoleBinding(spec, owner)); err != nil {
 		return err
 	}
-	if err := reconciler.upsertConfigMap(ctx, service.Namespace, desiredProxyConfigMap(service, spec, owner)); err != nil {
+	if err := reconciler.upsertConfigMap(ctx, source.ref.namespace, desiredProxyConfigMap(spec, owner)); err != nil {
 		return err
 	}
-	if err := reconciler.upsertDeployment(ctx, service.Namespace, desiredProxyDeployment(config, spec, owner)); err != nil {
+	if err := reconciler.upsertDeployment(ctx, source.ref.namespace, desiredProxyDeployment(config, spec, owner)); err != nil {
 		return err
 	}
 	return nil
 }
 
-func (reconciler Reconciler) ensureProxyAuthSecret(ctx context.Context, service corev1.Service, spec proxySpec) error {
-	owner := metav1.OwnerReference{
-		APIVersion: "v1",
-		Kind:       "Service",
-		Name:       service.Name,
-		UID:        service.UID,
-	}
-	client := reconciler.Client.CoreV1().Secrets(service.Namespace)
+func (reconciler Reconciler) ensureProxyAuthSecret(ctx context.Context, source source, spec proxySpec) error {
+	owner := source.ownerReference()
+	client := reconciler.Client.CoreV1().Secrets(source.ref.namespace)
 	existing, err := client.Get(ctx, spec.authSecretName, metav1.GetOptions{})
 	missing := apierrors.IsNotFound(err)
 	if err != nil && !missing {
-		return wrapProxyError("get proxy auth secret", service.Namespace, spec.authSecretName, err)
+		return wrapProxyError("get proxy auth secret", source.ref.namespace, spec.authSecretName, err)
 	}
 	if err == nil && len(existing.Data["TS_AUTHKEY"]) > 0 {
 		copy := existing.DeepCopy()
-		copy.Labels = proxyLabelsForService(service)
+		copy.Labels = proxyLabelsForSpec(spec)
 		copy.OwnerReferences = []metav1.OwnerReference{owner}
 		if copy.Type == "" {
 			copy.Type = corev1.SecretTypeOpaque
 		}
 		_, err = client.Update(ctx, copy, metav1.UpdateOptions{})
-		return wrapProxyError("adopt proxy auth secret", service.Namespace, spec.authSecretName, err)
+		return wrapProxyError("adopt proxy auth secret", source.ref.namespace, spec.authSecretName, err)
 	}
 	if reconciler.Headscale == nil {
 		return fmt.Errorf("managed proxy requires a Headscale client to mint %s", spec.authSecretName)
@@ -100,15 +103,15 @@ func (reconciler Reconciler) ensureProxyAuthSecret(ctx context.Context, service 
 	desired := &corev1.Secret{
 		ObjectMeta: withOwner(metav1.ObjectMeta{
 			Name:   spec.authSecretName,
-			Labels: proxyLabelsForService(service),
+			Labels: proxyLabelsForSpec(spec),
 		}, owner),
 		Type: corev1.SecretTypeOpaque,
 		Data: map[string][]byte{"TS_AUTHKEY": []byte(key)},
 	}
 	if missing {
-		desired.Namespace = service.Namespace
+		desired.Namespace = source.ref.namespace
 		_, err = client.Create(ctx, desired, metav1.CreateOptions{})
-		return wrapProxyError("create proxy auth secret", service.Namespace, spec.authSecretName, err)
+		return wrapProxyError("create proxy auth secret", source.ref.namespace, spec.authSecretName, err)
 	}
 	copy := existing.DeepCopy()
 	copy.Labels = desired.Labels
@@ -116,50 +119,58 @@ func (reconciler Reconciler) ensureProxyAuthSecret(ctx context.Context, service 
 	copy.Type = desired.Type
 	copy.Data = desired.Data
 	_, err = client.Update(ctx, copy, metav1.UpdateOptions{})
-	return wrapProxyError("update proxy auth secret", service.Namespace, spec.authSecretName, err)
+	return wrapProxyError("update proxy auth secret", source.ref.namespace, spec.authSecretName, err)
 }
 
-func desiredProxySpec(config Config, service corev1.Service, hosts []string) (proxySpec, error) {
+func desiredProxySpec(config Config, source source) (proxySpec, error) {
 	spec := proxySpec{
-		name:           proxyNameFor(service.Name),
-		tlsSecretName:  annotationOrDefault(service, proxyTLSSecretAnnotation, config.Proxy.DefaultTLSSecretName),
-		authSecretName: annotationOrDefault(service, proxyAuthSecretAnnotation, service.Name+"-tailnet-authkey"),
-		stateSecret:    annotationOrDefault(service, proxyStateSecretAnnotation, "tailscale-"+service.Name),
-		tailnetName:    annotationOrDefault(service, proxyTailnetNameAnnotation, service.Name),
-		hosts:          append([]string(nil), hosts...),
+		name:            proxyNameFor(source.ref.name),
+		tlsSecretName:   sourceAnnotationOrDefault(source, proxyTLSSecretAnnotation, config.Proxy.DefaultTLSSecretName),
+		authSecretName:  sourceAnnotationOrDefault(source, proxyAuthSecretAnnotation, source.ref.name+"-tailnet-authkey"),
+		stateSecret:     sourceAnnotationOrDefault(source, proxyStateSecretAnnotation, "tailscale-"+source.ref.name),
+		tailnetName:     sourceAnnotationOrDefault(source, proxyTailnetNameAnnotation, source.ref.name),
+		hosts:           append([]string(nil), source.hosts...),
+		routes:          append([]proxyRoute(nil), source.routes...),
+		sourceName:      source.ref.name,
+		sourceNamespace: source.ref.namespace,
+	}
+	if spec.tlsSecretName == config.Proxy.DefaultTLSSecretName && source.ingress != nil {
+		if tlsSecret := ingressTLSSecretName(*source.ingress); tlsSecret != "" {
+			spec.tlsSecretName = tlsSecret
+		}
 	}
 	if spec.tlsSecretName == "" {
-		return proxySpec{}, fmt.Errorf("managed proxy requires %s or a chart default TLS Secret", proxyTLSSecretAnnotation)
+		return proxySpec{}, fmt.Errorf("managed proxy requires %s, Ingress TLS, or a chart default TLS Secret", proxyTLSSecretAnnotation)
 	}
-	port, err := proxyServicePort(service)
-	if err != nil {
-		return proxySpec{}, err
+	if len(spec.routes) == 0 {
+		return proxySpec{}, fmt.Errorf("managed proxy requires at least one backend route")
 	}
-	spec.servicePort = port
+	spec.servicePort = spec.routes[0].ServicePort
 	return spec, nil
 }
 
-func annotationOrDefault(service corev1.Service, annotation string, fallback string) string {
-	value := strings.TrimSpace(service.Annotations[annotation])
+func sourceAnnotationOrDefault(source source, annotation string, fallback string) string {
+	value := strings.TrimSpace(sourceAnnotations(source)[annotation])
 	if value != "" {
 		return value
 	}
 	return fallback
 }
 
-func proxyServicePort(service corev1.Service) (int32, error) {
-	raw := strings.TrimSpace(service.Annotations[proxyServicePortAnnotation])
-	if raw != "" {
-		value, err := strconv.ParseInt(raw, 10, 32)
-		if err != nil || value <= 0 || value > 65535 {
-			return 0, fmt.Errorf("invalid proxy service port annotation")
+func sourceAnnotations(source source) map[string]string {
+	if source.ingress != nil {
+		return source.ingress.Annotations
+	}
+	return nil
+}
+
+func ingressTLSSecretName(ingress networkingv1.Ingress) string {
+	for _, tls := range ingress.Spec.TLS {
+		if strings.TrimSpace(tls.SecretName) != "" {
+			return strings.TrimSpace(tls.SecretName)
 		}
-		return int32(value), nil
 	}
-	if len(service.Spec.Ports) == 0 {
-		return 0, fmt.Errorf("managed proxy requires a Service port")
-	}
-	return service.Spec.Ports[0].Port, nil
+	return ""
 }
 
 func proxyNameFor(serviceName string) string {
@@ -181,9 +192,10 @@ func proxyLabels(serviceName string) map[string]string {
 	}
 }
 
-func proxyLabelsForService(service corev1.Service) map[string]string {
-	labels := proxyLabels(service.Name)
-	labels[proxySourceNamespaceLabel] = service.Namespace
+func proxyLabelsForSpec(spec proxySpec) map[string]string {
+	labels := proxyLabels(spec.sourceName)
+	labels[proxySourceNamespaceLabel] = spec.sourceNamespace
+	labels[proxySourceKindLabel] = "Ingress"
 	return labels
 }
 
@@ -201,7 +213,7 @@ func desiredProxyServiceAccount(spec proxySpec, owner metav1.OwnerReference) *co
 	return &corev1.ServiceAccount{
 		ObjectMeta: withOwner(metav1.ObjectMeta{
 			Name:   spec.name,
-			Labels: proxyLabels(owner.Name),
+			Labels: proxyLabelsForSpec(spec),
 		}, owner),
 	}
 }
@@ -210,7 +222,7 @@ func desiredProxyRole(spec proxySpec, owner metav1.OwnerReference) *rbacv1.Role 
 	return &rbacv1.Role{
 		ObjectMeta: withOwner(metav1.ObjectMeta{
 			Name:   spec.name,
-			Labels: proxyLabels(owner.Name),
+			Labels: proxyLabelsForSpec(spec),
 		}, owner),
 		Rules: []rbacv1.PolicyRule{
 			{
@@ -237,7 +249,7 @@ func desiredProxyRoleBinding(spec proxySpec, owner metav1.OwnerReference) *rbacv
 	return &rbacv1.RoleBinding{
 		ObjectMeta: withOwner(metav1.ObjectMeta{
 			Name:   spec.name,
-			Labels: proxyLabels(owner.Name),
+			Labels: proxyLabelsForSpec(spec),
 		}, owner),
 		RoleRef: rbacv1.RoleRef{
 			APIGroup: "rbac.authorization.k8s.io",
@@ -251,17 +263,13 @@ func desiredProxyRoleBinding(spec proxySpec, owner metav1.OwnerReference) *rbacv
 	}
 }
 
-func desiredProxyConfigMap(service corev1.Service, spec proxySpec, owner metav1.OwnerReference) *corev1.ConfigMap {
+func desiredProxyConfigMap(spec proxySpec, owner metav1.OwnerReference) *corev1.ConfigMap {
 	hosts := append([]string(nil), spec.hosts...)
 	sort.Strings(hosts)
-	serverName := strings.Join(hosts, " ")
-	if serverName == "" {
-		serverName = "_"
-	}
 	return &corev1.ConfigMap{
 		ObjectMeta: withOwner(metav1.ObjectMeta{
 			Name:   spec.name + "-nginx",
-			Labels: proxyLabelsForService(service),
+			Labels: proxyLabelsForSpec(spec),
 		}, owner),
 		Data: map[string]string{
 			"nginx.conf": fmt.Sprintf(`worker_processes 1;
@@ -283,29 +291,66 @@ http {
   proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
   proxy_set_header X-Forwarded-Proto https;
 
-  server {
-    listen 127.0.0.1:443 ssl;
-    http2 on;
-    server_name %s;
-
-    ssl_certificate     /etc/tls/tls.crt;
-    ssl_certificate_key /etc/tls/tls.key;
-    ssl_protocols       TLSv1.2 TLSv1.3;
-
-    location / {
-      proxy_pass http://%s.%s.svc.cluster.local:%d;
-    }
-  }
+%s
 }
-`, serverName, service.Name, service.Namespace, spec.servicePort),
+`, nginxServerBlocks(hosts, spec.routes)),
 		},
 	}
+}
+
+func nginxServerBlocks(hosts []string, routes []proxyRoute) string {
+	var builder strings.Builder
+	for _, host := range hosts {
+		builder.WriteString("  server {\n")
+		builder.WriteString("    listen 127.0.0.1:443 ssl;\n")
+		builder.WriteString("    http2 on;\n")
+		builder.WriteString("    server_name " + host + ";\n\n")
+		builder.WriteString("    ssl_certificate     /etc/tls/tls.crt;\n")
+		builder.WriteString("    ssl_certificate_key /etc/tls/tls.key;\n")
+		builder.WriteString("    ssl_protocols       TLSv1.2 TLSv1.3;\n\n")
+		for _, route := range routesForHost(host, routes) {
+			builder.WriteString("    ")
+			builder.WriteString(nginxLocation(route))
+			builder.WriteString(" {\n")
+			builder.WriteString(fmt.Sprintf("      proxy_pass http://%s.%s.svc.cluster.local:%d;\n", route.ServiceName, route.ServiceNamespace, route.ServicePort))
+			builder.WriteString("    }\n")
+		}
+		builder.WriteString("  }\n")
+	}
+	return builder.String()
+}
+
+func routesForHost(host string, routes []proxyRoute) []proxyRoute {
+	var out []proxyRoute
+	for _, route := range routes {
+		if route.Host == "" || route.Host == host {
+			out = append(out, route)
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].PathType != out[j].PathType {
+			return out[i].PathType == networkingv1.PathTypeExact
+		}
+		return len(out[i].Path) > len(out[j].Path)
+	})
+	return out
+}
+
+func nginxLocation(route proxyRoute) string {
+	path := route.Path
+	if path == "" {
+		path = "/"
+	}
+	if route.PathType == networkingv1.PathTypeExact {
+		return "location = " + strconv.Quote(path)
+	}
+	return "location " + strconv.Quote(path)
 }
 
 func desiredProxyDeployment(config Config, spec proxySpec, owner metav1.OwnerReference) *appsv1.Deployment {
 	replicas := int32(1)
 	falseValue := false
-	labels := proxyLabels(owner.Name)
+	labels := proxyLabelsForSpec(spec)
 	return &appsv1.Deployment{
 		ObjectMeta: withOwner(metav1.ObjectMeta{
 			Name:   spec.name,

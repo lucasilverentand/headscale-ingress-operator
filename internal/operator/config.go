@@ -13,6 +13,7 @@ type Config struct {
 	RecordsConfigMapName string
 	RecordsConfigMapKey  string
 	AllowedZones         []string
+	IngressClassName     string
 	Proxy                ProxyConfig
 }
 
@@ -38,6 +39,7 @@ func (config Config) withDefaults() Config {
 	config.HeadscaleNamespace = strings.TrimSpace(config.HeadscaleNamespace)
 	config.RecordsConfigMapName = strings.TrimSpace(config.RecordsConfigMapName)
 	config.RecordsConfigMapKey = strings.TrimSpace(config.RecordsConfigMapKey)
+	config.IngressClassName = strings.TrimSpace(config.IngressClassName)
 	config.Proxy.HeadscaleServerURL = strings.TrimSpace(config.Proxy.HeadscaleServerURL)
 	config.Proxy.TailscaleImage = strings.TrimSpace(config.Proxy.TailscaleImage)
 	config.Proxy.NginxImage = strings.TrimSpace(config.Proxy.NginxImage)
@@ -55,6 +57,9 @@ func (config Config) withDefaults() Config {
 	}
 	if config.RecordsConfigMapKey == "" {
 		config.RecordsConfigMapKey = "extra-records.json"
+	}
+	if config.IngressClassName == "" {
+		config.IngressClassName = "headscale"
 	}
 	if config.Proxy.TailscaleImage == "" {
 		config.Proxy.TailscaleImage = "tailscale/tailscale:stable"
@@ -90,6 +95,9 @@ func (config Config) validated() (Config, error) {
 	}
 	if errs := validation.IsConfigMapKey(config.RecordsConfigMapKey); len(errs) > 0 {
 		return Config{}, fmt.Errorf("records ConfigMap key %q is invalid: %s", config.RecordsConfigMapKey, strings.Join(errs, "; "))
+	}
+	if err := validateDNS1123Subdomain("ingress class name", config.IngressClassName); err != nil {
+		return Config{}, err
 	}
 	if config.Proxy.Enabled {
 		if config.Proxy.HeadscaleServerURL == "" {

@@ -38,6 +38,7 @@ spec:
             - --records-configmap={{ .Values.headscale.recordsConfigMap }}
             - --records-key={{ .Values.headscale.recordsKey }}
             - --allowed-zones={{ join "," .Values.config.allowedZones }}
+            - --ingress-class={{ .Values.config.ingressClassName }}
             - --proxy-enabled={{ .Values.proxy.enabled }}
             - --proxy-headscale-server-url={{ .Values.headscale.serverURL }}
             - --proxy-headscale-pod-selector={{ .Values.headscale.podSelector }}
