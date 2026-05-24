@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.0.1](https://github.com/lucasilverentand/headscale-ingress-operator/compare/v2.0.0...v2.0.1) (2026-05-24)
+
+
+### Bug Fixes
+
+* allow proxy cleanup deletes ([882d3cb](https://github.com/lucasilverentand/headscale-ingress-operator/commit/882d3cbd5d777c8ce0ca40fa1beb783e94c80fab))
+
 ## [2.0.0](https://github.com/lucasilverentand/headscale-ingress-operator/compare/v1.2.0...v2.0.0) (2026-05-24)
 
 
