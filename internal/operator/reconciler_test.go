@@ -116,6 +116,79 @@ func TestReconcileCreatesManagedProxyResourcesForIngress(t *testing.T) {
 	}
 }
 
+func TestReconcileRepairsStaleManagedRecordsConfigMap(t *testing.T) {
+	ctx := context.Background()
+	service := plainService("apps", "radarr", 7878)
+	ingress := sourceIngress("apps", "radarr", "radarr.cluster.example", "radarr", networkingv1.ServiceBackendPort{Number: 7878})
+	client := fake.NewSimpleClientset(
+		namespace("apps"),
+		namespace("headscale"),
+		service,
+		ingress,
+		managedRecordsConfigMap(t, []DNSRecord{{Name: "radarr.cluster.example", Type: "A", Value: "100.64.0.6"}}),
+	)
+
+	reconciler := Reconciler{
+		Client:    client,
+		Headscale: fakeHeadscale{authKey: "tskey-auth", nodes: map[string][]string{"radarr": {"100.64.0.7"}}},
+		Config:    testConfig(),
+	}
+
+	summary, err := reconciler.Reconcile(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !summary.RecordsChanged {
+		t.Fatalf("expected stale records ConfigMap to be updated: %+v", summary)
+	}
+
+	records := recordsFromConfigMap(t, client, ctx)
+	want := []DNSRecord{{Name: "radarr.cluster.example", Type: "A", Value: "100.64.0.7"}}
+	if !recordsEqual(records, want) {
+		t.Fatalf("records = %#v, want %#v", records, want)
+	}
+}
+
+func TestReconcileRemovesStaleRecordWhenProxyNodeIPIsMissing(t *testing.T) {
+	ctx := context.Background()
+	service := plainService("apps", "radarr", 7878)
+	ingress := sourceIngress("apps", "radarr", "radarr.cluster.example", "radarr", networkingv1.ServiceBackendPort{Number: 7878})
+	client := fake.NewSimpleClientset(
+		namespace("apps"),
+		namespace("headscale"),
+		service,
+		ingress,
+		managedRecordsConfigMap(t, []DNSRecord{{Name: "radarr.cluster.example", Type: "A", Value: "100.64.0.6"}}),
+	)
+
+	reconciler := Reconciler{
+		Client:    client,
+		Headscale: fakeHeadscale{authKey: "tskey-auth", nodes: map[string][]string{}},
+		Config:    testConfig(),
+	}
+
+	summary, err := reconciler.Reconcile(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.Records != 0 || len(summary.Skipped) != 1 || !summary.RecordsChanged {
+		t.Fatalf("unexpected summary: %+v", summary)
+	}
+
+	records := recordsFromConfigMap(t, client, ctx)
+	if len(records) != 0 {
+		t.Fatalf("records = %#v, want none", records)
+	}
+
+	updated, err := client.NetworkingV1().Ingresses("apps").Get(ctx, "radarr", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Annotations[statusAnnotation] != statusPendingNode {
+		t.Fatalf("ingress status annotation = %q", updated.Annotations[statusAnnotation])
+	}
+}
+
 func TestReconcileResolvesNamedIngressBackendServicePort(t *testing.T) {
 	ctx := context.Background()
 	service := plainService("apps", "radarr", 7878)
@@ -366,6 +439,24 @@ func recordsFromConfigMap(t *testing.T, client *fake.Clientset, ctx context.Cont
 		t.Fatal(err)
 	}
 	return records
+}
+
+func managedRecordsConfigMap(t *testing.T, records []DNSRecord) *corev1.ConfigMap {
+	t.Helper()
+	payload, err := stableRecordsJSON(records)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "headscale-extra-records",
+			Namespace: "headscale",
+			Labels: map[string]string{
+				managedByLabel: managedByValue,
+			},
+		},
+		Data: map[string]string{"extra-records.json": payload},
+	}
 }
 
 func envContains(values []corev1.EnvVar, name string, value string) bool {
