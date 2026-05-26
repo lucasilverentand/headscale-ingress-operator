@@ -35,6 +35,7 @@ type Reconciler struct {
 type Summary struct {
 	SourceIngresses int
 	Records         int
+	RecordsChanged  bool
 	Skipped         []string
 }
 
@@ -196,9 +197,11 @@ func (reconciler Reconciler) Reconcile(ctx context.Context) (Summary, error) {
 	}
 
 	records = dedupeRecords(records)
-	if err := reconciler.publishRecords(ctx, config, records); err != nil {
+	recordsChanged, err := reconciler.publishRecords(ctx, config, records)
+	if err != nil {
 		return summary, err
 	}
+	summary.RecordsChanged = recordsChanged
 	for _, mark := range readyMarks {
 		if err := reconciler.markSource(ctx, mark.source, mark.status, mark.targets); err != nil {
 			return summary, err
@@ -283,10 +286,10 @@ func (reconciler Reconciler) markIngress(ctx context.Context, ingress networking
 	return nil
 }
 
-func (reconciler Reconciler) publishRecords(ctx context.Context, config Config, records []DNSRecord) error {
+func (reconciler Reconciler) publishRecords(ctx context.Context, config Config, records []DNSRecord) (bool, error) {
 	payload, err := stableRecordsJSON(records)
 	if err != nil {
-		return err
+		return false, err
 	}
 
 	client := reconciler.Client.CoreV1().ConfigMaps(config.HeadscaleNamespace)
@@ -304,15 +307,18 @@ func (reconciler Reconciler) publishRecords(ctx context.Context, config Config, 
 			Data: desiredData,
 		}, metav1.CreateOptions{})
 		if err != nil {
-			return fmt.Errorf("create records ConfigMap %s/%s: %w", config.HeadscaleNamespace, config.RecordsConfigMapName, err)
+			return false, fmt.Errorf("create records ConfigMap %s/%s: %w", config.HeadscaleNamespace, config.RecordsConfigMapName, err)
 		}
-		return nil
+		return true, nil
 	}
 	if err != nil {
-		return fmt.Errorf("get records ConfigMap %s/%s: %w", config.HeadscaleNamespace, config.RecordsConfigMapName, err)
+		return false, fmt.Errorf("get records ConfigMap %s/%s: %w", config.HeadscaleNamespace, config.RecordsConfigMapName, err)
 	}
 	if existing.Labels[managedByLabel] != managedByValue {
-		return fmt.Errorf("refusing to update ConfigMap %s/%s without %s=%s label", config.HeadscaleNamespace, config.RecordsConfigMapName, managedByLabel, managedByValue)
+		return false, fmt.Errorf("refusing to update ConfigMap %s/%s without %s=%s label", config.HeadscaleNamespace, config.RecordsConfigMapName, managedByLabel, managedByValue)
+	}
+	if existing.Data != nil && existing.Data[config.RecordsConfigMapKey] == payload {
+		return false, nil
 	}
 
 	copy := existing.DeepCopy()
@@ -325,9 +331,9 @@ func (reconciler Reconciler) publishRecords(ctx context.Context, config Config, 
 	}
 	copy.Data[config.RecordsConfigMapKey] = payload
 	if _, err = client.Update(ctx, copy, metav1.UpdateOptions{}); err != nil {
-		return fmt.Errorf("update records ConfigMap %s/%s: %w", config.HeadscaleNamespace, config.RecordsConfigMapName, err)
+		return false, fmt.Errorf("update records ConfigMap %s/%s: %w", config.HeadscaleNamespace, config.RecordsConfigMapName, err)
 	}
-	return nil
+	return true, nil
 }
 
 func ingressOptedIn(ingress networkingv1.Ingress, ingressClassName string) bool {
