@@ -149,6 +149,14 @@ The proxy joins Headscale as one app-specific node, runs
 Ingress backend Service. The operator discovers the app node's Headscale IPs and
 publishes those as DNS targets.
 
+Managed proxies use the chart-level `proxy.authKeyTags` by default. To give one
+Ingress a more specific Headscale ACL identity, set
+`headscale-ingress-operator.lucasilverentand.dev/acl-tags` to a comma-separated
+list of tags such as `tag:app,tag:team`. Empty or missing annotations fall back
+to the chart default tags. The tags must already make sense in your Headscale
+policy; the operator mints tagged preauth keys, but it does not generate users,
+groups, tag owners, or ACL rules.
+
 The app-side ideal is:
 
 1. Deploy the app Pod or Deployment.
@@ -159,6 +167,7 @@ Everything else is created and reconciled by the operator.
 
 Useful optional annotations:
 
+- `headscale-ingress-operator.lucasilverentand.dev/acl-tags`
 - `headscale-ingress-operator.lucasilverentand.dev/proxy-tls-secret`
 - `headscale-ingress-operator.lucasilverentand.dev/proxy-auth-secret`
 - `headscale-ingress-operator.lucasilverentand.dev/proxy-state-secret`

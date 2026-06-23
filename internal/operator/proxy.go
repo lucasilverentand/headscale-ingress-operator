@@ -15,6 +15,7 @@ import (
 	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/validation"
 )
 
 const (
@@ -22,6 +23,7 @@ const (
 	proxyAuthSecretAnnotation  = "headscale-ingress-operator.lucasilverentand.dev/proxy-auth-secret"
 	proxyStateSecretAnnotation = "headscale-ingress-operator.lucasilverentand.dev/proxy-state-secret"
 	proxyTailnetNameAnnotation = "headscale-ingress-operator.lucasilverentand.dev/proxy-tailnet-name"
+	proxyACLTagsAnnotation     = "headscale-ingress-operator.lucasilverentand.dev/acl-tags"
 	proxyComponentLabel        = "headscale-ingress-operator.lucasilverentand.dev/component"
 	proxySourceNamespaceLabel  = "headscale-ingress-operator.lucasilverentand.dev/source-namespace"
 	proxySourceNameLabel       = "headscale-ingress-operator.lucasilverentand.dev/source-name"
@@ -42,6 +44,7 @@ type proxySpec struct {
 	name            string
 	tlsSecretName   string
 	authSecretName  string
+	authKeyTags     []string
 	stateSecret     string
 	tailnetName     string
 	servicePort     int32
@@ -96,7 +99,7 @@ func (reconciler Reconciler) ensureProxyAuthSecret(ctx context.Context, source s
 	if reconciler.Headscale == nil {
 		return fmt.Errorf("managed proxy requires a Headscale client to mint %s", spec.authSecretName)
 	}
-	key, err := reconciler.Headscale.MintReusableAuthKey(ctx)
+	key, err := reconciler.Headscale.MintReusableAuthKey(ctx, spec.authKeyTags)
 	if err != nil {
 		return fmt.Errorf("mint proxy auth key: %w", err)
 	}
@@ -123,10 +126,15 @@ func (reconciler Reconciler) ensureProxyAuthSecret(ctx context.Context, source s
 }
 
 func desiredProxySpec(config Config, source source) (proxySpec, error) {
+	authKeyTags, err := sourceAuthKeyTags(config, source)
+	if err != nil {
+		return proxySpec{}, err
+	}
 	spec := proxySpec{
 		name:            proxyNameFor(source.ref.name),
 		tlsSecretName:   sourceAnnotationOrDefault(source, proxyTLSSecretAnnotation, config.Proxy.DefaultTLSSecretName),
 		authSecretName:  sourceAnnotationOrDefault(source, proxyAuthSecretAnnotation, source.ref.name+"-tailnet-authkey"),
+		authKeyTags:     authKeyTags,
 		stateSecret:     sourceAnnotationOrDefault(source, proxyStateSecretAnnotation, "tailscale-"+source.ref.name),
 		tailnetName:     sourceAnnotationOrDefault(source, proxyTailnetNameAnnotation, source.ref.name),
 		hosts:           append([]string(nil), source.hosts...),
@@ -155,6 +163,59 @@ func sourceAnnotationOrDefault(source source, annotation string, fallback string
 		return value
 	}
 	return fallback
+}
+
+func sourceAuthKeyTags(config Config, source source) ([]string, error) {
+	raw, ok := sourceAnnotations(source)[proxyACLTagsAnnotation]
+	if !ok || strings.TrimSpace(raw) == "" {
+		return normalizeAuthKeyTags(config.Proxy.AuthKeyTags)
+	}
+	tags, err := parseAuthKeyTags(raw)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", proxyACLTagsAnnotation, err)
+	}
+	if len(tags) == 0 {
+		return normalizeAuthKeyTags(config.Proxy.AuthKeyTags)
+	}
+	return tags, nil
+}
+
+func parseAuthKeyTags(value string) ([]string, error) {
+	return normalizeAuthKeyTags(strings.Split(value, ","))
+}
+
+func normalizeAuthKeyTags(values []string) ([]string, error) {
+	seen := map[string]struct{}{}
+	tags := make([]string, 0, len(values))
+	for _, value := range values {
+		tag := strings.TrimSpace(value)
+		if tag == "" {
+			continue
+		}
+		if err := validateAuthKeyTag(tag); err != nil {
+			return nil, err
+		}
+		if _, ok := seen[tag]; ok {
+			continue
+		}
+		seen[tag] = struct{}{}
+		tags = append(tags, tag)
+	}
+	return tags, nil
+}
+
+func validateAuthKeyTag(tag string) error {
+	if !strings.HasPrefix(tag, "tag:") {
+		return fmt.Errorf("auth key tag %q must start with tag:", tag)
+	}
+	name := strings.TrimPrefix(tag, "tag:")
+	if name == "" {
+		return fmt.Errorf("auth key tag %q must include a tag name", tag)
+	}
+	if errs := validation.IsDNS1123Label(name); len(errs) > 0 {
+		return fmt.Errorf("auth key tag %q is invalid: %s", tag, strings.Join(errs, "; "))
+	}
+	return nil
 }
 
 func sourceAnnotations(source source) map[string]string {

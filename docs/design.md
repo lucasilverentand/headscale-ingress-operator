@@ -67,10 +67,18 @@ forwards traffic to the backend Service DNS name declared by the Ingress. The
 operator mints the preauth key by executing the Headscale CLI in the configured
 Headscale pod, then writes the key into the source namespace.
 
+By default, auth keys use the chart-level `proxy.authKeyTags`. An Ingress can
+override those tags with
+`headscale-ingress-operator.lucasilverentand.dev/acl-tags`, using a
+comma-separated list such as `tag:app,tag:team`. This only controls the managed
+proxy's tag identity. Cluster owners still manage the Headscale policy file
+explicitly, including tag owners, users, groups, and ACL or grant rules.
+
 Ingress annotations override defaults:
 
 | Annotation | Purpose |
 | --- | --- |
+| `headscale-ingress-operator.lucasilverentand.dev/acl-tags` | Comma-separated Headscale tags for the proxy auth key. Defaults to `proxy.authKeyTags`. |
 | `headscale-ingress-operator.lucasilverentand.dev/proxy-tls-secret` | TLS Secret mounted into nginx. |
 | `headscale-ingress-operator.lucasilverentand.dev/proxy-auth-secret` | Secret containing `TS_AUTHKEY`. Defaults to `<source>-tailnet-authkey`. |
 | `headscale-ingress-operator.lucasilverentand.dev/proxy-state-secret` | Secret used by `TS_KUBE_SECRET`. Defaults to `tailscale-<source>`. |
@@ -151,6 +159,10 @@ Status values:
 | `PendingAuthKey` | Managed proxy mode is waiting for a Headscale preauth key. |
 | `PendingNodeIP` | Managed proxy mode is waiting for the app node to appear in Headscale. |
 | `Rejected` | The Ingress has invalid hostnames, conflicting hostnames, or invalid backends. |
+
+When a source is not ready, the operator also writes
+`headscale-ingress-operator.lucasilverentand.dev/status-reason` with the
+validation or reconciliation reason.
 
 ## Permissions
 

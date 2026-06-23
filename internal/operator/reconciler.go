@@ -17,13 +17,14 @@ import (
 )
 
 const (
-	managedByValue    = "headscale-ingress-operator"
-	statusAnnotation  = "headscale-ingress-operator.lucasilverentand.dev/status"
-	managedByLabel    = "app.kubernetes.io/managed-by"
-	statusReady       = "Ready"
-	statusPendingAuth = "PendingAuthKey"
-	statusPendingNode = "PendingNodeIP"
-	statusRejected    = "Rejected"
+	managedByValue         = "headscale-ingress-operator"
+	statusAnnotation       = "headscale-ingress-operator.lucasilverentand.dev/status"
+	statusReasonAnnotation = "headscale-ingress-operator.lucasilverentand.dev/status-reason"
+	managedByLabel         = "app.kubernetes.io/managed-by"
+	statusReady            = "Ready"
+	statusPendingAuth      = "PendingAuthKey"
+	statusPendingNode      = "PendingNodeIP"
+	statusRejected         = "Rejected"
 )
 
 type Reconciler struct {
@@ -74,6 +75,7 @@ func (source source) ownerReference() metav1.OwnerReference {
 type sourceMark struct {
 	source  source
 	status  string
+	reason  string
 	targets []string
 }
 
@@ -114,38 +116,43 @@ func (reconciler Reconciler) Reconcile(ctx context.Context) (Summary, error) {
 		sourceID := "Ingress/" + source.id()
 		hosts := source.hosts
 		if len(hosts) == 0 {
-			summary.Skipped = append(summary.Skipped, sourceID+": no hostnames declared")
-			if err := reconciler.markSource(ctx, source, statusRejected, nil); err != nil {
+			reason := "no hostnames declared"
+			summary.Skipped = append(summary.Skipped, sourceID+": "+reason)
+			if err := reconciler.markSource(ctx, source, statusRejected, reason, nil); err != nil {
 				return summary, err
 			}
 			continue
 		}
 
 		if invalidHost, reason := firstRejectedHost(hosts, config.AllowedZones); invalidHost != "" {
-			summary.Skipped = append(summary.Skipped, sourceID+": host "+invalidHost+" "+reason)
-			if err := reconciler.markSource(ctx, source, statusRejected, nil); err != nil {
+			reason := "host " + invalidHost + " " + reason
+			summary.Skipped = append(summary.Skipped, sourceID+": "+reason)
+			if err := reconciler.markSource(ctx, source, statusRejected, reason, nil); err != nil {
 				return summary, err
 			}
 			continue
 		}
 
 		if conflictingHost := firstConflictingHost(hosts, hostOwners, sourceID); conflictingHost != "" {
-			summary.Skipped = append(summary.Skipped, sourceID+": host "+conflictingHost+" is claimed by another headscale source")
-			if err := reconciler.markSource(ctx, source, statusRejected, nil); err != nil {
+			reason := "host " + conflictingHost + " is claimed by another headscale source"
+			summary.Skipped = append(summary.Skipped, sourceID+": "+reason)
+			if err := reconciler.markSource(ctx, source, statusRejected, reason, nil); err != nil {
 				return summary, err
 			}
 			continue
 		}
 		if source.routeErr != nil {
-			summary.Skipped = append(summary.Skipped, sourceID+": "+source.routeErr.Error())
-			if err := reconciler.markSource(ctx, source, statusRejected, nil); err != nil {
+			reason := source.routeErr.Error()
+			summary.Skipped = append(summary.Skipped, sourceID+": "+reason)
+			if err := reconciler.markSource(ctx, source, statusRejected, reason, nil); err != nil {
 				return summary, err
 			}
 			continue
 		}
 		if !config.Proxy.Enabled {
-			summary.Skipped = append(summary.Skipped, sourceID+": proxy management is disabled")
-			if err := reconciler.markSource(ctx, source, statusRejected, nil); err != nil {
+			reason := "proxy management is disabled"
+			summary.Skipped = append(summary.Skipped, sourceID+": "+reason)
+			if err := reconciler.markSource(ctx, source, statusRejected, reason, nil); err != nil {
 				return summary, err
 			}
 			continue
@@ -155,22 +162,25 @@ func (reconciler Reconciler) Reconcile(ctx context.Context) (Summary, error) {
 		activeProxies[source.activeKey()] = struct{}{}
 		spec, err := desiredProxySpec(config, source)
 		if err != nil {
-			summary.Skipped = append(summary.Skipped, sourceID+": "+err.Error())
-			if err := reconciler.markSource(ctx, source, statusRejected, nil); err != nil {
+			reason := err.Error()
+			summary.Skipped = append(summary.Skipped, sourceID+": "+reason)
+			if err := reconciler.markSource(ctx, source, statusRejected, reason, nil); err != nil {
 				return summary, err
 			}
 			continue
 		}
 		if err := reconciler.ensureProxyAuthSecret(ctx, source, spec); err != nil {
-			summary.Skipped = append(summary.Skipped, sourceID+": "+err.Error())
-			if err := reconciler.markSource(ctx, source, statusPendingAuth, nil); err != nil {
+			reason := err.Error()
+			summary.Skipped = append(summary.Skipped, sourceID+": "+reason)
+			if err := reconciler.markSource(ctx, source, statusPendingAuth, reason, nil); err != nil {
 				return summary, err
 			}
 			continue
 		}
 		if err := reconciler.reconcileProxy(ctx, config, source, spec); err != nil {
-			summary.Skipped = append(summary.Skipped, sourceID+": "+err.Error())
-			if markErr := reconciler.markSource(ctx, source, statusRejected, nil); markErr != nil {
+			reason := err.Error()
+			summary.Skipped = append(summary.Skipped, sourceID+": "+reason)
+			if markErr := reconciler.markSource(ctx, source, statusRejected, reason, nil); markErr != nil {
 				return summary, markErr
 			}
 			continue
@@ -178,15 +188,17 @@ func (reconciler Reconciler) Reconcile(ctx context.Context) (Summary, error) {
 
 		targets, err = reconciler.proxyTargetIPs(ctx, spec)
 		if err != nil {
-			summary.Skipped = append(summary.Skipped, sourceID+": "+err.Error())
-			if err := reconciler.markSource(ctx, source, statusRejected, nil); err != nil {
+			reason := err.Error()
+			summary.Skipped = append(summary.Skipped, sourceID+": "+reason)
+			if err := reconciler.markSource(ctx, source, statusRejected, reason, nil); err != nil {
 				return summary, err
 			}
 			continue
 		}
 		if len(targets) == 0 {
-			summary.Skipped = append(summary.Skipped, sourceID+": no Headscale node IPs resolved for "+spec.tailnetName)
-			if err := reconciler.markSource(ctx, source, statusPendingNode, nil); err != nil {
+			reason := "no Headscale node IPs resolved for " + spec.tailnetName
+			summary.Skipped = append(summary.Skipped, sourceID+": "+reason)
+			if err := reconciler.markSource(ctx, source, statusPendingNode, reason, nil); err != nil {
 				return summary, err
 			}
 			continue
@@ -203,7 +215,7 @@ func (reconciler Reconciler) Reconcile(ctx context.Context) (Summary, error) {
 	}
 	summary.RecordsChanged = recordsChanged
 	for _, mark := range readyMarks {
-		if err := reconciler.markSource(ctx, mark.source, mark.status, mark.targets); err != nil {
+		if err := reconciler.markSource(ctx, mark.source, mark.status, mark.reason, mark.targets); err != nil {
 			return summary, err
 		}
 	}
@@ -245,19 +257,25 @@ func (reconciler Reconciler) proxyTargetIPs(ctx context.Context, spec proxySpec)
 	return reconciler.Headscale.NodeIPs(ctx, spec.tailnetName)
 }
 
-func (reconciler Reconciler) markSource(ctx context.Context, source source, status string, targets []string) error {
-	if err := reconciler.markIngress(ctx, *source.ingress, status, targets); err != nil {
+func (reconciler Reconciler) markSource(ctx context.Context, source source, status string, reason string, targets []string) error {
+	if err := reconciler.markIngress(ctx, *source.ingress, status, reason, targets); err != nil {
 		return err
 	}
 	return nil
 }
 
-func (reconciler Reconciler) markIngress(ctx context.Context, ingress networkingv1.Ingress, status string, targets []string) error {
+func (reconciler Reconciler) markIngress(ctx context.Context, ingress networkingv1.Ingress, status string, reason string, targets []string) error {
+	annotations := map[string]any{
+		statusAnnotation: status,
+	}
+	if strings.TrimSpace(reason) == "" {
+		annotations[statusReasonAnnotation] = nil
+	} else {
+		annotations[statusReasonAnnotation] = reason
+	}
 	metadataPatch, err := json.Marshal(map[string]any{
 		"metadata": map[string]any{
-			"annotations": map[string]string{
-				statusAnnotation: status,
-			},
+			"annotations": annotations,
 		},
 	})
 	if err != nil {

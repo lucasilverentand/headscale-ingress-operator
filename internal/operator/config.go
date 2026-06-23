@@ -103,6 +103,11 @@ func (config Config) validated() (Config, error) {
 		if config.Proxy.HeadscaleServerURL == "" {
 			return Config{}, fmt.Errorf("proxy Headscale server URL is required when proxy management is enabled")
 		}
+		authKeyTags, err := normalizeAuthKeyTags(config.Proxy.AuthKeyTags)
+		if err != nil {
+			return Config{}, fmt.Errorf("proxy auth key tags: %w", err)
+		}
+		config.Proxy.AuthKeyTags = authKeyTags
 		if config.Proxy.DefaultTLSSecretName != "" {
 			if err := validateDNS1123Subdomain("proxy default TLS Secret name", config.Proxy.DefaultTLSSecretName); err != nil {
 				return Config{}, err

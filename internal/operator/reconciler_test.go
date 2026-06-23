@@ -25,12 +25,14 @@ func TestReconcileCreatesManagedProxyResourcesForIngress(t *testing.T) {
 		service,
 		ingress,
 	)
+	var authKeyTags []string
 
 	reconciler := Reconciler{
 		Client: client,
 		Headscale: fakeHeadscale{
-			authKey: "tskey-auth",
-			nodes:   map[string][]string{"radarr": {"100.64.0.7"}},
+			authKey:         "tskey-auth",
+			nodes:           map[string][]string{"radarr": {"100.64.0.7"}},
+			lastAuthKeyTags: &authKeyTags,
 		},
 		Config: testConfig(),
 	}
@@ -49,6 +51,9 @@ func TestReconcileCreatesManagedProxyResourcesForIngress(t *testing.T) {
 	}
 	if string(secret.Data["TS_AUTHKEY"]) != "tskey-auth" {
 		t.Fatalf("auth secret key = %q", secret.Data["TS_AUTHKEY"])
+	}
+	if !slices.Equal(authKeyTags, []string{"tag:cluster"}) {
+		t.Fatalf("auth key tags = %#v", authKeyTags)
 	}
 
 	deployment, err := client.AppsV1().Deployments("apps").Get(ctx, "radarr-tailnet-sidecar", metav1.GetOptions{})
@@ -113,6 +118,80 @@ func TestReconcileCreatesManagedProxyResourcesForIngress(t *testing.T) {
 	want := []DNSRecord{{Name: "radarr.cluster.example", Type: "A", Value: "100.64.0.7"}}
 	if !recordsEqual(records, want) {
 		t.Fatalf("records = %#v, want %#v", records, want)
+	}
+}
+
+func TestReconcileUsesIngressACLTagsForManagedProxyAuthKey(t *testing.T) {
+	ctx := context.Background()
+	service := plainService("apps", "radarr", 7878)
+	ingress := sourceIngress("apps", "radarr", "radarr.cluster.example", "radarr", networkingv1.ServiceBackendPort{Number: 7878})
+	ingress.Annotations[proxyACLTagsAnnotation] = "tag:app, tag:team, tag:app"
+	client := fake.NewSimpleClientset(namespace("apps"), namespace("headscale"), service, ingress)
+	var authKeyTags []string
+
+	reconciler := Reconciler{
+		Client: client,
+		Headscale: fakeHeadscale{
+			authKey:         "tskey-auth",
+			nodes:           map[string][]string{"radarr": {"100.64.0.7"}},
+			lastAuthKeyTags: &authKeyTags,
+		},
+		Config: testConfig(),
+	}
+
+	summary, err := reconciler.Reconcile(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(summary.Skipped) != 0 {
+		t.Fatalf("unexpected summary: %+v", summary)
+	}
+	if !slices.Equal(authKeyTags, []string{"tag:app", "tag:team"}) {
+		t.Fatalf("auth key tags = %#v", authKeyTags)
+	}
+}
+
+func TestReconcileRejectsInvalidIngressACLTags(t *testing.T) {
+	ctx := context.Background()
+	service := plainService("apps", "radarr", 7878)
+	ingress := sourceIngress("apps", "radarr", "radarr.cluster.example", "radarr", networkingv1.ServiceBackendPort{Number: 7878})
+	ingress.Annotations[proxyACLTagsAnnotation] = "tag:app, Team"
+	client := fake.NewSimpleClientset(namespace("apps"), namespace("headscale"), service, ingress)
+	var authKeyTags []string
+
+	reconciler := Reconciler{
+		Client: client,
+		Headscale: fakeHeadscale{
+			authKey:         "tskey-auth",
+			nodes:           map[string][]string{"radarr": {"100.64.0.7"}},
+			lastAuthKeyTags: &authKeyTags,
+		},
+		Config: testConfig(),
+	}
+
+	summary, err := reconciler.Reconcile(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.Records != 0 || len(summary.Skipped) != 1 {
+		t.Fatalf("unexpected summary: %+v", summary)
+	}
+	if len(authKeyTags) != 0 {
+		t.Fatalf("auth key was minted with tags %#v", authKeyTags)
+	}
+	updated, err := client.NetworkingV1().Ingresses("apps").Get(ctx, "radarr", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Annotations[statusAnnotation] != statusRejected {
+		t.Fatalf("ingress status annotation = %q", updated.Annotations[statusAnnotation])
+	}
+	reason := updated.Annotations[statusReasonAnnotation]
+	if !strings.Contains(reason, proxyACLTagsAnnotation) || !strings.Contains(reason, "must start with tag:") {
+		t.Fatalf("ingress status reason = %q", reason)
+	}
+	if _, err := client.CoreV1().Secrets("apps").Get(ctx, "radarr-tailnet-authkey", metav1.GetOptions{}); err == nil {
+		t.Fatal("expected auth secret not to be created")
 	}
 }
 
@@ -572,11 +651,15 @@ func recordsEqual(left, right []DNSRecord) bool {
 }
 
 type fakeHeadscale struct {
-	authKey string
-	nodes   map[string][]string
+	authKey         string
+	nodes           map[string][]string
+	lastAuthKeyTags *[]string
 }
 
-func (fake fakeHeadscale) MintReusableAuthKey(context.Context) (string, error) {
+func (fake fakeHeadscale) MintReusableAuthKey(_ context.Context, tags []string) (string, error) {
+	if fake.lastAuthKeyTags != nil {
+		*fake.lastAuthKeyTags = append((*fake.lastAuthKeyTags)[:0], tags...)
+	}
 	return fake.authKey, nil
 }
 
