@@ -18,36 +18,34 @@ import (
 )
 
 type HeadscaleClient interface {
-	MintReusableAuthKey(ctx context.Context) (string, error)
+	MintReusableAuthKey(ctx context.Context, tags []string) (string, error)
 	NodeIPs(ctx context.Context, nodeName string) ([]string, error)
 }
 
 type KubernetesHeadscaleClient struct {
-	client      kubernetes.Interface
-	restConfig  *rest.Config
-	namespace   string
-	selector    string
-	container   string
-	user        string
-	expiration  string
-	authKeyTags []string
+	client     kubernetes.Interface
+	restConfig *rest.Config
+	namespace  string
+	selector   string
+	container  string
+	user       string
+	expiration string
 }
 
 func NewKubernetesHeadscaleClient(client kubernetes.Interface, restConfig *rest.Config, config Config) *KubernetesHeadscaleClient {
 	config = config.withDefaults()
 	return &KubernetesHeadscaleClient{
-		client:      client,
-		restConfig:  restConfig,
-		namespace:   config.HeadscaleNamespace,
-		selector:    config.Proxy.HeadscalePodSelector,
-		container:   config.Proxy.HeadscaleContainer,
-		user:        config.Proxy.HeadscaleUser,
-		expiration:  config.Proxy.AuthKeyExpiration,
-		authKeyTags: append([]string(nil), config.Proxy.AuthKeyTags...),
+		client:     client,
+		restConfig: restConfig,
+		namespace:  config.HeadscaleNamespace,
+		selector:   config.Proxy.HeadscalePodSelector,
+		container:  config.Proxy.HeadscaleContainer,
+		user:       config.Proxy.HeadscaleUser,
+		expiration: config.Proxy.AuthKeyExpiration,
 	}
 }
 
-func (client *KubernetesHeadscaleClient) MintReusableAuthKey(ctx context.Context) (string, error) {
+func (client *KubernetesHeadscaleClient) MintReusableAuthKey(ctx context.Context, tags []string) (string, error) {
 	if client == nil {
 		return "", fmt.Errorf("headscale client is required")
 	}
@@ -67,8 +65,8 @@ func (client *KubernetesHeadscaleClient) MintReusableAuthKey(ctx context.Context
 		"--reusable",
 		"--expiration", client.expiration,
 	}
-	if len(client.authKeyTags) > 0 {
-		args = append(args, "--tags", strings.Join(client.authKeyTags, ","))
+	if len(tags) > 0 {
+		args = append(args, "--tags", strings.Join(tags, ","))
 	}
 	out, err := client.execHeadscale(ctx, args...)
 	if err != nil {
