@@ -44,7 +44,7 @@ jobs:
       - name: Collect image metadata
         if: ${{ steps.release.outputs.release_created == 'true' }}
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: ghcr.io/lucasilverentand/headscale-ingress-operator
           tags: |
