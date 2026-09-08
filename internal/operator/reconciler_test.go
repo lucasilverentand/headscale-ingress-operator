@@ -666,3 +666,28 @@ func (fake fakeHeadscale) MintReusableAuthKey(_ context.Context, tags []string) 
 func (fake fakeHeadscale) NodeIPs(_ context.Context, nodeName string) ([]string, error) {
 	return fake.nodes[nodeName], nil
 }
+
+func TestDesiredProxyDeploymentRestartsWhenContainerbootDies(t *testing.T) {
+	deployment := desiredProxyDeployment(Config{Proxy: ProxyConfig{TailscaleImage: "tailscale", NginxImage: "nginx"}}, testProxySpec("radarr"), metav1.OwnerReference{Kind: "Ingress", Name: "radarr"})
+
+	var tailscale *corev1.Container
+	for i := range deployment.Spec.Template.Spec.Containers {
+		if deployment.Spec.Template.Spec.Containers[i].Name == "tailscale" {
+			tailscale = &deployment.Spec.Template.Spec.Containers[i]
+		}
+	}
+	if tailscale == nil {
+		t.Fatal("tailscale container missing")
+	}
+
+	script := strings.Join(tailscale.Args, "\n")
+	if !strings.Contains(script, `kill -0 "$BOOT_PID"`) {
+		t.Fatalf("wait loop does not check containerboot liveness:\n%s", script)
+	}
+	if tailscale.LivenessProbe == nil || tailscale.LivenessProbe.Exec == nil {
+		t.Fatal("tailscale container has no exec liveness probe")
+	}
+	if tailscale.LivenessProbe.TimeoutSeconds == 0 || tailscale.ReadinessProbe.TimeoutSeconds == 0 {
+		t.Fatal("tailscale probes must set an explicit timeout")
+	}
+}

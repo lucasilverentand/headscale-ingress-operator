@@ -408,6 +408,34 @@ func nginxLocation(route proxyRoute) string {
 	return "location " + strconv.Quote(path)
 }
 
+// proxyTailscaleScript is PID 1 of the tailscale container. containerboot runs
+// in the background so the script can install the serve rule once tailscaled is
+// reachable. The wait loop checks that containerboot is still alive on every
+// iteration: if it exits before tailscaled answers (for example because the
+// Headscale control plane returned 503 during login), the script exits with
+// containerboot's status instead of spinning forever, so kubelet restarts the
+// container.
+const proxyTailscaleScript = `set -e
+
+/usr/local/bin/containerboot &
+BOOT_PID=$!
+
+until /usr/local/bin/tailscale status > /dev/null 2>&1; do
+  if ! kill -0 "$BOOT_PID" 2> /dev/null; then
+    echo "containerboot exited before tailscaled became reachable" >&2
+    wait "$BOOT_PID"
+    exit 1
+  fi
+  sleep 1
+done
+
+/usr/local/bin/tailscale serve \
+  --bg --tcp 443 \
+  "tcp://127.0.0.1:443"
+
+wait $BOOT_PID
+`
+
 func desiredProxyDeployment(config Config, spec proxySpec, owner metav1.OwnerReference) *appsv1.Deployment {
 	replicas := int32(1)
 	falseValue := false
@@ -434,21 +462,7 @@ func desiredProxyDeployment(config Config, spec proxySpec, owner metav1.OwnerRef
 							Name:    "tailscale",
 							Image:   config.Proxy.TailscaleImage,
 							Command: []string{"/bin/sh", "-c"},
-							Args: []string{`set -e
-
-/usr/local/bin/containerboot &
-BOOT_PID=$!
-
-until /usr/local/bin/tailscale status > /dev/null 2>&1; do
-  sleep 1
-done
-
-/usr/local/bin/tailscale serve \
-  --bg --tcp 443 \
-  "tcp://127.0.0.1:443"
-
-wait $BOOT_PID
-`},
+							Args:    []string{proxyTailscaleScript},
 							Env: []corev1.EnvVar{
 								{Name: "TS_USERSPACE", Value: "true"},
 								{Name: "TS_HOSTNAME", Value: spec.tailnetName},
@@ -489,6 +503,16 @@ wait $BOOT_PID
 								},
 								InitialDelaySeconds: 10,
 								PeriodSeconds:       15,
+								TimeoutSeconds:      5,
+							},
+							LivenessProbe: &corev1.Probe{
+								ProbeHandler: corev1.ProbeHandler{
+									Exec: &corev1.ExecAction{Command: []string{"/usr/local/bin/tailscale", "status"}},
+								},
+								InitialDelaySeconds: 60,
+								PeriodSeconds:       30,
+								TimeoutSeconds:      5,
+								FailureThreshold:    3,
 							},
 						},
 						{
