@@ -87,6 +87,14 @@ Ingress annotations override defaults:
 This keeps the Headscale identity per application. It does not create one shared
 gateway node for all applications.
 
+The tailscale container runs `containerboot` in the background behind a shell
+wrapper that installs the `tailscale serve` rule once tailscaled answers. The
+wrapper exits with a failure if `containerboot` dies before that point, for
+example when Headscale returns `503` during login, and the container carries a
+`tailscale status` liveness probe. Either path makes kubelet restart the
+container, so a proxy that lost its daemon recovers on its own instead of
+sitting at `1/2 Running` until someone deletes the pod.
+
 ## Headscale Write Path
 
 Headscale watches a JSON file through `dns.extra_records_path`. In Kubernetes,
