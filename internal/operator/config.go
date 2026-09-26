@@ -3,6 +3,7 @@ package operator
 import (
 	"fmt"
 	"net/netip"
+	"net/url"
 	"strings"
 
 	"k8s.io/apimachinery/pkg/util/validation"
@@ -14,7 +15,20 @@ type Config struct {
 	RecordsConfigMapKey  string
 	AllowedZones         []string
 	IngressClassName     string
+	HeadscaleAPI         HeadscaleAPIConfig
 	Proxy                ProxyConfig
+}
+
+// HeadscaleAPIConfig selects the REST API client. When URL is empty the
+// operator falls back to exec'ing the headscale CLI in the Headscale pod.
+type HeadscaleAPIConfig struct {
+	URL           string
+	KeySecretName string
+	KeySecretKey  string
+}
+
+func (api HeadscaleAPIConfig) Enabled() bool {
+	return api.URL != ""
 }
 
 type ProxyConfig struct {
@@ -40,6 +54,9 @@ func (config Config) withDefaults() Config {
 	config.RecordsConfigMapName = strings.TrimSpace(config.RecordsConfigMapName)
 	config.RecordsConfigMapKey = strings.TrimSpace(config.RecordsConfigMapKey)
 	config.IngressClassName = strings.TrimSpace(config.IngressClassName)
+	config.HeadscaleAPI.URL = strings.TrimSpace(config.HeadscaleAPI.URL)
+	config.HeadscaleAPI.KeySecretName = strings.TrimSpace(config.HeadscaleAPI.KeySecretName)
+	config.HeadscaleAPI.KeySecretKey = strings.TrimSpace(config.HeadscaleAPI.KeySecretKey)
 	config.Proxy.HeadscaleServerURL = strings.TrimSpace(config.Proxy.HeadscaleServerURL)
 	config.Proxy.TailscaleImage = strings.TrimSpace(config.Proxy.TailscaleImage)
 	config.Proxy.NginxImage = strings.TrimSpace(config.Proxy.NginxImage)
@@ -60,6 +77,12 @@ func (config Config) withDefaults() Config {
 	}
 	if config.IngressClassName == "" {
 		config.IngressClassName = "headscale"
+	}
+	if config.HeadscaleAPI.KeySecretName == "" {
+		config.HeadscaleAPI.KeySecretName = "headscale-api-key"
+	}
+	if config.HeadscaleAPI.KeySecretKey == "" {
+		config.HeadscaleAPI.KeySecretKey = "HEADSCALE_API_KEY"
 	}
 	if config.Proxy.TailscaleImage == "" {
 		config.Proxy.TailscaleImage = "tailscale/tailscale:stable"
@@ -98,6 +121,21 @@ func (config Config) validated() (Config, error) {
 	}
 	if err := validateDNS1123Subdomain("ingress class name", config.IngressClassName); err != nil {
 		return Config{}, err
+	}
+	if config.HeadscaleAPI.Enabled() {
+		parsed, err := url.Parse(config.HeadscaleAPI.URL)
+		if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
+			return Config{}, fmt.Errorf("headscale API URL %q must be an absolute http(s) URL", config.HeadscaleAPI.URL)
+		}
+		if err := validateDNS1123Subdomain("headscale API key Secret name", config.HeadscaleAPI.KeySecretName); err != nil {
+			return Config{}, err
+		}
+		if errs := validation.IsConfigMapKey(config.HeadscaleAPI.KeySecretKey); len(errs) > 0 {
+			return Config{}, fmt.Errorf("headscale API key Secret key %q is invalid: %s", config.HeadscaleAPI.KeySecretKey, strings.Join(errs, "; "))
+		}
+		if _, err := parseHeadscaleDuration(config.Proxy.AuthKeyExpiration); err != nil {
+			return Config{}, fmt.Errorf("proxy auth key expiration: %w", err)
+		}
 	}
 	if config.Proxy.Enabled {
 		if config.Proxy.HeadscaleServerURL == "" {

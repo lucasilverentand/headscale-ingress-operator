@@ -41,6 +41,11 @@ spec:
             - --ingress-class={{ .Values.config.ingressClassName }}
             - --proxy-enabled={{ .Values.proxy.enabled }}
             - --proxy-headscale-server-url={{ .Values.headscale.serverURL }}
+            {{- with .Values.headscale.api.url }}
+            - --headscale-api-url={{ . }}
+            - --headscale-api-key-secret={{ $.Values.headscale.api.keySecret.name }}
+            - --headscale-api-key-secret-key={{ $.Values.headscale.api.keySecret.key }}
+            {{- end }}
             - --proxy-headscale-pod-selector={{ .Values.headscale.podSelector }}
             - --proxy-headscale-container={{ .Values.headscale.container }}
             - --proxy-headscale-user={{ .Values.proxy.headscaleUser }}

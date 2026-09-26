@@ -112,6 +112,11 @@ Enable managed proxy support in the chart before using Headscale Ingresses:
 ```yaml
 headscale:
   serverURL: https://headscale.example
+  api:
+    url: http://headscale.headscale.svc:8080
+    keySecret:
+      name: headscale-api-key
+      key: HEADSCALE_API_KEY
 
 proxy:
   enabled: true
@@ -119,6 +124,13 @@ proxy:
   nginxImage: nginx:1.27-alpine
   defaultTLSSecret: wildcard-example-tls
 ```
+
+With `headscale.api.url` set, the operator mints preauth keys and looks up node
+IPs through Headscale's REST API, using the API key in `headscale.api.keySecret`
+(a Secret in the Headscale namespace that you keep filled and rotated). Its Role
+there is then only `get` on that Secret. Leave `headscale.api.url` empty to fall
+back to exec'ing the Headscale CLI in the Headscale pod, which needs
+`pods/exec` in that namespace.
 
 Then declare a normal Ingress:
 
