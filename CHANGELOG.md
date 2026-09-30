@@ -1,5 +1,20 @@
 # Changelog
 
+## [2.1.0](https://github.com/lucasilverentand/headscale-ingress-operator/compare/v2.0.1...v2.1.0) (2026-09-30)
+
+
+### Features
+
+* feat: support per-ingress Headscale ACL tags ([#40](https://github.com/lucasilverentand/headscale-ingress-operator/issues/40)) ([d46dbfe](https://github.com/lucasilverentand/headscale-ingress-operator/commit/d46dbfe177549ec17e1a398a1375c78c5f9e3aef))
+* mint preauth keys through the Headscale REST API ([#42](https://github.com/lucasilverentand/headscale-ingress-operator/issues/42)) ([725b7f9](https://github.com/lucasilverentand/headscale-ingress-operator/commit/725b7f94d0b0f288643a065ea2c29dae87505556))
+
+
+### Bug Fixes
+
+* **deps:** update kubernetes monorepo to v0.37.1 ([#14](https://github.com/lucasilverentand/headscale-ingress-operator/issues/14)) ([f1d40a5](https://github.com/lucasilverentand/headscale-ingress-operator/commit/f1d40a551c6952b29aa1304e7a53dc9b220e7396))
+* reconcile stale headscale records ([#38](https://github.com/lucasilverentand/headscale-ingress-operator/issues/38)) ([153f42c](https://github.com/lucasilverentand/headscale-ingress-operator/commit/153f42c95f0e8a23beac2ed3d6d68c973673aac3))
+* restart and gracefully stop the tailnet proxy ([#41](https://github.com/lucasilverentand/headscale-ingress-operator/issues/41)) ([fb8a1f0](https://github.com/lucasilverentand/headscale-ingress-operator/commit/fb8a1f032b0b7c90bb2568564b26311f772ad088))
+
 ## [2.0.1](https://github.com/lucasilverentand/headscale-ingress-operator/compare/v2.0.0...v2.0.1) (2026-05-24)
 
 
