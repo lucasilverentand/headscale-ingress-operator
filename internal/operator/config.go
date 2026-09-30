@@ -28,7 +28,7 @@ type HeadscaleAPIConfig struct {
 }
 
 func (api HeadscaleAPIConfig) Enabled() bool {
-	return api.URL != ""
+	return strings.TrimSpace(api.URL) != ""
 }
 
 type ProxyConfig struct {

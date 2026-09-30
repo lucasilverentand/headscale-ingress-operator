@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -175,12 +176,23 @@ func (client *APIHeadscaleClient) do(ctx context.Context, key string, method str
 		return err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		// Errors are also published as Ingress annotations. Keep the body excerpt
+		// small even when an upstream proxy returns a large error page.
+		const maxErrorBodyBytes = 4 << 10
+		payload, err := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyBytes+1))
+		if err != nil {
+			return fmt.Errorf("%s %s: HTTP %d: read error response: %w", method, path, resp.StatusCode, err)
+		}
+		message := strings.TrimSpace(string(payload))
+		if len(payload) > maxErrorBodyBytes {
+			message = strings.TrimSpace(string(payload[:maxErrorBodyBytes])) + "... (truncated)"
+		}
+		return fmt.Errorf("%s %s: HTTP %d: %s", method, path, resp.StatusCode, message)
+	}
 	payload, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
 	if err != nil {
 		return err
-	}
-	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		return fmt.Errorf("%s %s: HTTP %d: %s", method, path, resp.StatusCode, strings.TrimSpace(string(payload)))
 	}
 	if out == nil {
 		return nil
@@ -196,9 +208,12 @@ func (client *APIHeadscaleClient) do(ctx context.Context, key string, method str
 func parseHeadscaleDuration(value string) (time.Duration, error) {
 	value = strings.TrimSpace(value)
 	if days, ok := strings.CutSuffix(value, "d"); ok {
-		count, err := strconv.Atoi(days)
+		count, err := strconv.ParseInt(days, 10, 64)
 		if err != nil || count <= 0 {
 			return 0, fmt.Errorf("%q is not a positive number of days", value)
+		}
+		if count > math.MaxInt64/int64(24*time.Hour) {
+			return 0, fmt.Errorf("%q exceeds the maximum duration", value)
 		}
 		return time.Duration(count) * 24 * time.Hour, nil
 	}

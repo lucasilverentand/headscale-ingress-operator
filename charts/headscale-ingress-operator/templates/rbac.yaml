@@ -60,7 +60,7 @@ rules:
   - apiGroups: [""]
     resources: ["configmaps"]
     verbs: ["create"]
-  {{- if .Values.headscale.api.url }}
+  {{- if (.Values.headscale.api.url | default "" | trim) }}
   - apiGroups: [""]
     resources: ["secrets"]
     resourceNames: [{{ .Values.headscale.api.keySecret.name | quote }}]
