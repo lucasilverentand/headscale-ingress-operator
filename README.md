@@ -121,7 +121,7 @@ headscale:
 proxy:
   enabled: true
   tailscaleImage: tailscale/tailscale:v1.98.3
-  nginxImage: nginx:1.27-alpine
+  nginxImage: nginx:1.31-alpine
   defaultTLSSecret: wildcard-example-tls
 ```
 
