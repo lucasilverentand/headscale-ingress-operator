@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
@@ -271,7 +272,7 @@ func (reconciler Reconciler) markIngress(ctx context.Context, ingress networking
 	if strings.TrimSpace(reason) == "" {
 		annotations[statusReasonAnnotation] = nil
 	} else {
-		annotations[statusReasonAnnotation] = reason
+		annotations[statusReasonAnnotation] = truncateStatusReason(reason)
 	}
 	metadataPatch, err := json.Marshal(map[string]any{
 		"metadata": map[string]any{
@@ -302,6 +303,20 @@ func (reconciler Reconciler) markIngress(ctx context.Context, ingress networking
 		return fmt.Errorf("update ingress status %s/%s: %w", ingress.Namespace, ingress.Name, err)
 	}
 	return nil
+}
+
+// Leave room for other annotations and avoid invalid UTF-8 at the cut point.
+func truncateStatusReason(reason string) string {
+	const maxBytes = 4 << 10
+	const suffix = "... (truncated)"
+	if len(reason) <= maxBytes {
+		return reason
+	}
+	end := maxBytes - len(suffix)
+	for end > 0 && !utf8.RuneStart(reason[end]) {
+		end--
+	}
+	return reason[:end] + suffix
 }
 
 func (reconciler Reconciler) publishRecords(ctx context.Context, config Config, records []DNSRecord) (bool, error) {

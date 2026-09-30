@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
@@ -13,6 +14,31 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/kubernetes/fake"
 )
+
+func TestMarkIngressBoundsStatusReason(t *testing.T) {
+	for _, reason := range []string{"short error", strings.Repeat("x", 300*1024), strings.Repeat("界", 100*1024)} {
+		ingress := sourceIngress("apps", "broken", "broken.cluster.example", "backend", networkingv1.ServiceBackendPort{Number: 80})
+		client := fake.NewSimpleClientset(ingress)
+		reconciler := Reconciler{Client: client}
+		if err := reconciler.markIngress(context.Background(), *ingress, statusRejected, reason, nil); err != nil {
+			t.Fatal(err)
+		}
+		updated, err := client.NetworkingV1().Ingresses("apps").Get(context.Background(), "broken", metav1.GetOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := updated.Annotations[statusReasonAnnotation]
+		if len(got) > 4<<10 || !utf8.ValidString(got) {
+			t.Fatal("stored reason must be bounded and valid UTF-8")
+		}
+		if len(reason) <= 4<<10 && got != reason {
+			t.Fatal("short reason was changed")
+		}
+		if len(reason) > 4<<10 && !strings.HasSuffix(got, "... (truncated)") {
+			t.Fatal("large reason is missing the truncation marker")
+		}
+	}
+}
 
 func TestReconcileCreatesManagedProxyResourcesForIngress(t *testing.T) {
 	ctx := context.Background()

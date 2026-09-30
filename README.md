@@ -112,13 +112,29 @@ Enable managed proxy support in the chart before using Headscale Ingresses:
 ```yaml
 headscale:
   serverURL: https://headscale.example
+  api:
+    url: http://headscale.headscale.svc:8080
+    keySecret:
+      name: headscale-api-key
+      key: HEADSCALE_API_KEY
 
 proxy:
   enabled: true
   tailscaleImage: tailscale/tailscale:v1.98.3
-  nginxImage: nginx:1.27-alpine
+  nginxImage: nginx:1.31-alpine
   defaultTLSSecret: wildcard-example-tls
 ```
+
+With `headscale.api.url` set, the operator mints preauth keys and looks up node
+IPs through Headscale's REST API, using the API key in `headscale.api.keySecret`
+(a Secret in the Headscale namespace that you keep filled and rotated). The
+Headscale namespace Role replaces pod lookup and `pods/exec` permissions with
+`get` on that Secret, while retaining its records ConfigMap permissions.
+The chart's existing ClusterRole still grants cluster-wide Secret and workload
+access; the named Secret rule does not restrict those additive permissions.
+The API key also grants Headscale administrative access. Leave
+`headscale.api.url` empty or whitespace-only to use the Headscale CLI in the
+Headscale pod, which needs `pods/exec` in that namespace.
 
 Then declare a normal Ingress:
 

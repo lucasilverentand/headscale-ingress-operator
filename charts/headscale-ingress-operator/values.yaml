@@ -58,6 +58,11 @@ headscale:
   container: headscale
   recordsConfigMap: headscale-extra-records
   recordsKey: extra-records.json
+  api:
+    url: ""
+    keySecret:
+      name: headscale-api-key
+      key: HEADSCALE_API_KEY
   seedConfigMap:
     create: false
     keepOnUninstall: true
@@ -69,5 +74,5 @@ proxy:
   authKeyTags:
     - tag:cluster
   tailscaleImage: tailscale/tailscale:stable
-  nginxImage: nginx:1.27-alpine
+  nginxImage: nginx:1.31-alpine
   defaultTLSSecret: ""

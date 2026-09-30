@@ -27,6 +27,9 @@ func main() {
 	var ingressClassName string
 	var proxyEnabled bool
 	var proxyHeadscaleServerURL string
+	var headscaleAPIURL string
+	var headscaleAPIKeySecret string
+	var headscaleAPIKeySecretKey string
 	var proxyTailscaleImage string
 	var proxyNginxImage string
 	var proxyDefaultTLSSecret string
@@ -44,6 +47,9 @@ func main() {
 	flag.StringVar(&allowedZones, "allowed-zones", "", "Comma-separated DNS zones this operator may publish. Empty allows all hosts.")
 	flag.StringVar(&ingressClassName, "ingress-class", "headscale", "IngressClass name handled by this operator.")
 	flag.BoolVar(&proxyEnabled, "proxy-enabled", false, "Create managed tailnet proxy workloads for handled Ingresses.")
+	flag.StringVar(&headscaleAPIURL, "headscale-api-url", "", "Headscale REST API base URL, e.g. http://headscale.headscale.svc:8080. When set, the operator uses the API instead of exec'ing into the Headscale pod.")
+	flag.StringVar(&headscaleAPIKeySecret, "headscale-api-key-secret", "", "Secret in the Headscale namespace holding the API key used with --headscale-api-url. Defaults to headscale-api-key.")
+	flag.StringVar(&headscaleAPIKeySecretKey, "headscale-api-key-secret-key", "", "Key in --headscale-api-key-secret holding the API key. Defaults to HEADSCALE_API_KEY.")
 	flag.StringVar(&proxyHeadscaleServerURL, "proxy-headscale-server-url", "", "Headscale server URL passed to managed proxy Tailscale containers.")
 	flag.StringVar(&proxyTailscaleImage, "proxy-tailscale-image", "", "Tailscale image for managed proxy workloads.")
 	flag.StringVar(&proxyNginxImage, "proxy-nginx-image", "", "nginx image for managed proxy workloads.")
@@ -66,6 +72,11 @@ func main() {
 		RecordsConfigMapKey:  recordsKey,
 		AllowedZones:         splitCSV(allowedZones),
 		IngressClassName:     ingressClassName,
+		HeadscaleAPI: operator.HeadscaleAPIConfig{
+			URL:           headscaleAPIURL,
+			KeySecretName: headscaleAPIKeySecret,
+			KeySecretKey:  headscaleAPIKeySecretKey,
+		},
 		Proxy: operator.ProxyConfig{
 			Enabled:              proxyEnabled,
 			HeadscaleServerURL:   proxyHeadscaleServerURL,
@@ -91,10 +102,21 @@ func main() {
 		os.Exit(1)
 	}
 
+	var headscale operator.HeadscaleClient = operator.NewKubernetesHeadscaleClient(client, restConfig, operatorConfig)
+	if operatorConfig.HeadscaleAPI.Enabled() {
+		apiClient, err := operator.NewAPIHeadscaleClient(client, operatorConfig)
+		if err != nil {
+			slog.Error("create Headscale API client", "error", err)
+			os.Exit(1)
+		}
+		headscale = apiClient
+		slog.Info("using the Headscale REST API", "url", headscaleAPIURL)
+	}
+
 	reconciler := operator.Reconciler{
 		Client:    client,
 		Config:    operatorConfig,
-		Headscale: operator.NewKubernetesHeadscaleClient(client, restConfig, operatorConfig),
+		Headscale: headscale,
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
