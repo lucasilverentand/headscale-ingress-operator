@@ -88,7 +88,7 @@ func (config Config) withDefaults() Config {
 		config.Proxy.TailscaleImage = "tailscale/tailscale:stable"
 	}
 	if config.Proxy.NginxImage == "" {
-		config.Proxy.NginxImage = "nginx:1.27-alpine"
+		config.Proxy.NginxImage = "nginx:1.31-alpine"
 	}
 	if config.Proxy.HeadscalePodSelector == "" {
 		config.Proxy.HeadscalePodSelector = "app.kubernetes.io/name=headscale"
