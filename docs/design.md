@@ -64,8 +64,20 @@ the source namespace:
 The proxy joins Headscale with an app-specific node name, runs
 `tailscale serve --tcp 443`, terminates TLS on localhost with nginx, and
 forwards traffic to the backend Service DNS name declared by the Ingress. The
-operator mints the preauth key by executing the Headscale CLI in the configured
-Headscale pod, then writes the key into the source namespace.
+operator mints the preauth key, then writes the key into the source namespace.
+It reaches Headscale one of two ways:
+
+- **REST API** (`headscale.api.url` / `--headscale-api-url`): the operator calls
+  Headscale's `/api/v1` with an API key it reads from a Secret in the Headscale
+  namespace on every call, so a rotated key is picked up without a restart.
+  Something else must keep that Secret filled with a valid key; the operator
+  only reads it. This is the recommended mode: it removes the operator's
+  `pods/exec` permission, while the API key still grants Headscale
+  administrative access.
+- **CLI exec** (default when no API URL is set): the operator executes the
+  Headscale CLI in the configured Headscale pod. This needs `pods/exec`, which
+  cannot be scoped to one pod and gives the operator everything the Headscale
+  container can reach, including its database credentials and noise key.
 
 By default, auth keys use the chart-level `proxy.authKeyTags`. An Ingress can
 override those tags with
@@ -176,9 +188,18 @@ The operator needs:
 - `get`, `list`, `watch`, `create`, `update`, and `patch` on generated
   ServiceAccounts, ConfigMaps, Deployments, Roles, and RoleBindings when managed
   proxy mode is enabled
-- `get` and `list` on Headscale pods plus `create` on `pods/exec` in the
-  Headscale namespace when managed proxy mode mints auth keys or discovers node
-  IPs
+- in REST API mode, `get` on the one API key Secret in the Headscale
+  namespace; in CLI exec mode, `get` and `list` on Headscale pods plus `create`
+  on `pods/exec` in the Headscale namespace. Either is used when managed proxy
+  mode mints auth keys or discovers node IPs
+
+These describe the operations the client uses. The chart's existing
+ClusterRole and ClusterRoleBinding grant cluster-wide access to Secrets and
+proxy resources, including write and delete permissions. Kubernetes RBAC
+grants are additive: the named API key Secret rule in the namespace Role does
+not restrict that broader access. REST API mode removes `pods/exec` from the
+namespace Role and retains its records ConfigMap permissions; it does not
+establish a one-Secret authorization boundary for the ServiceAccount.
 
 Generated proxy resources are owned by the Ingress, so normal Kubernetes
 garbage collection removes them when the Ingress is deleted.
