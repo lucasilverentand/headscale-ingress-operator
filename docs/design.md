@@ -106,6 +106,9 @@ example when Headscale returns `503` during login, and the container carries a
 `tailscale status` liveness probe. Either path makes kubelet restart the
 container, so a proxy that lost its daemon recovers on its own instead of
 sitting at `1/2 Running` until someone deletes the pod.
+The wrapper forwards termination signals to `containerboot` and waits for its
+shutdown, allowing it to finish persisting state before kubelet's grace period
+expires.
 
 ## Headscale Write Path
 

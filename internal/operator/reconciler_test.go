@@ -713,7 +713,11 @@ func TestDesiredProxyDeploymentRestartsWhenContainerbootDies(t *testing.T) {
 	if tailscale.LivenessProbe == nil || tailscale.LivenessProbe.Exec == nil {
 		t.Fatal("tailscale container has no exec liveness probe")
 	}
-	if tailscale.LivenessProbe.TimeoutSeconds == 0 || tailscale.ReadinessProbe.TimeoutSeconds == 0 {
-		t.Fatal("tailscale probes must set an explicit timeout")
+	if tailscale.ReadinessProbe == nil || tailscale.ReadinessProbe.TimeoutSeconds != 5 || tailscale.LivenessProbe.TimeoutSeconds != 5 {
+		t.Fatal("tailscale probes must allow five seconds for local API responses")
+	}
+	if !slices.Equal(tailscale.LivenessProbe.Exec.Command, []string{"/usr/local/bin/tailscale", "status"}) ||
+		tailscale.LivenessProbe.InitialDelaySeconds != 60 || tailscale.LivenessProbe.PeriodSeconds != 30 || tailscale.LivenessProbe.FailureThreshold != 3 {
+		t.Fatal("liveness probe must check tailscale status with a startup grace period and repeated failures")
 	}
 }

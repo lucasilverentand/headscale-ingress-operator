@@ -414,11 +414,20 @@ func nginxLocation(route proxyRoute) string {
 // iteration: if it exits before tailscaled answers (for example because the
 // Headscale control plane returned 503 during login), the script exits with
 // containerboot's status instead of spinning forever, so kubelet restarts the
-// container.
+// container. Termination signals are forwarded so containerboot can flush state
+// and stop tailscaled before the container exits.
 const proxyTailscaleScript = `set -e
 
 /usr/local/bin/containerboot &
 BOOT_PID=$!
+
+terminate() {
+  trap '' TERM INT
+  kill -TERM "$BOOT_PID" 2> /dev/null || true
+  wait "$BOOT_PID" || true
+  exit 0
+}
+trap terminate TERM INT
 
 until /usr/local/bin/tailscale status > /dev/null 2>&1; do
   if ! kill -0 "$BOOT_PID" 2> /dev/null; then
@@ -433,7 +442,7 @@ done
   --bg --tcp 443 \
   "tcp://127.0.0.1:443"
 
-wait $BOOT_PID
+wait "$BOOT_PID"
 `
 
 func desiredProxyDeployment(config Config, spec proxySpec, owner metav1.OwnerReference) *appsv1.Deployment {
